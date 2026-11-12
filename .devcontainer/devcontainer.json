@@ -1,0 +1,20 @@
+{
+  "name": "SIGMA",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-20-bookworm",
+  "postCreateCommand": "corepack enable && corepack prepare pnpm@9.15.9 --activate && pnpm install",
+  "forwardPorts": [3000, 5173, 8081],
+  "portsAttributes": {
+    "3000": { "label": "Backend" },
+    "5173": { "label": "Web" },
+    "8081": { "label": "Mobile / Expo" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "vscode.typescript-language-features",
+        "github.copilot",
+        "github.copilot-chat"
+      ]
+    }
+  }
+}

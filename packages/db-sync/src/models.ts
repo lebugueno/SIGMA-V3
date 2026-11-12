@@ -1,7 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { Schema, model } from "mongoose";
 import type { InferSchemaType } from "mongoose";
 
 const tenantFields = {
+  _id: {
+    type: String,
+    default: () => randomUUID()
+  },
   tenant_id: {
     type: String,
     required: true,
@@ -46,6 +51,7 @@ const userSchema = new Schema(
     ...tenantFields,
     email: { type: String, required: true, lowercase: true, trim: true },
     nombre: { type: String, required: true, trim: true },
+    password_hash: { type: String, required: true, select: false },
     role: {
       type: String,
       enum: ["TECNICO", "SUPERVISOR", "BODEGA", "GERENCIA"],
@@ -62,6 +68,7 @@ const assetSchema = new Schema(
   {
     ...tenantFields,
     asset_code: { type: String, required: true, trim: true },
+    qr_code: { type: String, required: true, trim: true },
     nombre: { type: String, required: true, trim: true },
     marca: { type: String, trim: true },
     modelo: { type: String, trim: true },
@@ -76,6 +83,7 @@ const assetSchema = new Schema(
 );
 assetSchema.index({ tenant_id: 1, created_at: -1 });
 assetSchema.index({ tenant_id: 1, asset_code: 1 }, { unique: true });
+assetSchema.index({ tenant_id: 1, qr_code: 1 }, { unique: true });
 
 const anomalySchema = new Schema(
   {
@@ -83,6 +91,7 @@ const anomalySchema = new Schema(
     asset_id: { type: String, required: true, trim: true },
     reported_by: { type: String, required: true, trim: true },
     description: { type: String, required: true, trim: true },
+    client_mutation_id: { type: String, trim: true, immutable: true },
     severity: {
       type: String,
       enum: ["BAJA", "MEDIA", "ALTA", "CRITICA"],
@@ -106,6 +115,10 @@ const anomalySchema = new Schema(
 );
 anomalySchema.index({ tenant_id: 1, created_at: -1 });
 anomalySchema.index({ tenant_id: 1, asset_id: 1, created_at: -1 });
+anomalySchema.index(
+  { tenant_id: 1, client_mutation_id: 1 },
+  { unique: true, partialFilterExpression: { client_mutation_id: { $exists: true } } }
+);
 
 const workOrderSchema = new Schema(
   {
@@ -137,6 +150,8 @@ const auditLogSchema = new Schema(
     resource: { type: String, required: true, immutable: true },
     resource_id: { type: String, required: true, immutable: true },
     details: { type: Schema.Types.Mixed, immutable: true },
+    values_before: { type: Schema.Types.Mixed, immutable: true },
+    values_after: { type: Schema.Types.Mixed, immutable: true },
     occurred_at: {
       type: Date,
       required: true,
@@ -179,12 +194,32 @@ auditLogSchema.pre("bulkWrite", function () {
   throw new Error("Audit log entries are append-only");
 });
 
+const mutationReceiptSchema = new Schema(
+  {
+    ...tenantFields,
+    client_mutation_id: { type: String, required: true, immutable: true },
+    table: { type: String, required: true, immutable: true },
+    record_id: { type: String, required: true, immutable: true },
+    result: { type: Schema.Types.Mixed, required: true, immutable: true }
+  },
+  {
+    timestamps: { createdAt: "created_at", updatedAt: false },
+    versionKey: false as const,
+    strict: "throw"
+  }
+);
+mutationReceiptSchema.index(
+  { tenant_id: 1, client_mutation_id: 1 },
+  { unique: true }
+);
+
 export type OrganizationDocument = InferSchemaType<typeof organizationSchema>;
 export type UserDocument = InferSchemaType<typeof userSchema>;
 export type AssetDocument = InferSchemaType<typeof assetSchema>;
 export type AnomalyDocument = InferSchemaType<typeof anomalySchema>;
 export type WorkOrderDocument = InferSchemaType<typeof workOrderSchema>;
 export type AuditLogDocument = InferSchemaType<typeof auditLogSchema>;
+export type MutationReceiptDocument = InferSchemaType<typeof mutationReceiptSchema>;
 
 export const OrganizationModel = model(
   "Organization",
@@ -199,4 +234,9 @@ export const WorkOrderModel = model(
   workOrderSchema,
   "ordenes_trabajo"
 );
-export const AuditLogModel = model("AuditLog", auditLogSchema, "audit_logs");
+export const AuditLogModel = model("AuditLog", auditLogSchema, "auditoria");
+export const MutationReceiptModel = model(
+  "MutationReceipt",
+  mutationReceiptSchema,
+  "mutation_receipts"
+);

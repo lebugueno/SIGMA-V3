@@ -46,6 +46,7 @@ export const AssetSchema = z.object({
   id: idSchema,
   tenant_id: tenantIdSchema,
   asset_code: z.string().trim().min(1),
+  qr_code: z.string().trim().min(1),
   nombre: z.string().trim().min(1),
   marca: z.string().trim().min(1).optional(),
   modelo: z.string().trim().min(1).optional(),

@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@9.15.9",
   "scripts": {
-    "dev": "pnpm --filter @sigma/shared build && turbo run dev",
+    "dev": "pnpm --filter @sigma/api-client... build && turbo run dev",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck"
   },

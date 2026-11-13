@@ -3,7 +3,8 @@ bucket_definitions:
     parameters: |
       SELECT
         request.jwt() ->> 'tenant_id' AS tenant_id,
-        request.jwt() ->> 'role' AS role
+        request.jwt() ->> 'role' AS role,
+        request.jwt() ->> 'user_id' AS user_id
     data:
       - SELECT * FROM organizaciones WHERE tenant_id = bucket.tenant_id
       - SELECT * FROM usuarios
@@ -11,4 +12,9 @@ bucket_definitions:
           AND bucket.role IN ('SUPERVISOR', 'GERENCIA')
       - SELECT * FROM activos WHERE tenant_id = bucket.tenant_id
       - SELECT * FROM anomalias WHERE tenant_id = bucket.tenant_id
-      - SELECT * FROM ordenes_trabajo WHERE tenant_id = bucket.tenant_id
+      - SELECT * FROM ordenes_trabajo
+        WHERE tenant_id = bucket.tenant_id
+          AND (
+            bucket.role != 'TECNICO'
+            OR assigned_to = bucket.user_id
+          )

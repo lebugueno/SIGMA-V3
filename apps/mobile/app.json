@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "SIGMA Terreno",
+    "slug": "sigma-terreno",
+    "scheme": "sigma",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "cl.sigma.terreno"
+    },
+    "android": {
+      "package": "cl.sigma.terreno",
+      "permissions": ["CAMERA"]
+    },
+    "plugins": [
+      "expo-dev-client",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "SIGMA utiliza la cámara para escanear códigos QR de activos."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "SIGMA necesita acceder a fotos para adjuntar evidencia de anomalías."
+        }
+      ],
+      "expo-secure-store"
+    ]
+  }
+}

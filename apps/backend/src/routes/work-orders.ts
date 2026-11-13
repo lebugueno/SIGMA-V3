@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import { Router } from "express";
-import { WorkOrderModel } from "@sigma/db-sync";
+import { AuditLogModel, UserModel, WorkOrderModel } from "@sigma/db-sync";
 import { WorkOrderSchema } from "@sigma/shared";
 import { z } from "zod";
 import { requireAuth, requirePermission, requireRole } from "../middleware/auth.js";
@@ -77,6 +77,72 @@ function serializeWorkOrder(workOrder: {
 
 export const workOrdersRouter: ReturnType<typeof Router> = Router();
 workOrdersRouter.use(requireAuth);
+
+workOrdersRouter.get(
+  "/",
+  requirePermission("workOrders", "read"),
+  async (req, res) => {
+    const filter = {
+      tenant_id: req.tenantId,
+      ...(req.user?.role === "TECNICO"
+        ? { assigned_to: req.user.userId }
+        : {})
+    };
+    const workOrders = await WorkOrderModel.find(filter)
+      .sort({ created_at: -1 })
+      .limit(100)
+      .exec();
+    res.json({ workOrders: workOrders.map(serializeWorkOrder) });
+  }
+);
+
+workOrdersRouter.get(
+  "/tecnicos",
+  requireRole("SUPERVISOR"),
+  async (req, res) => {
+    const technicians = await UserModel.find({
+      tenant_id: req.tenantId,
+      role: "TECNICO",
+      active: true
+    })
+      .select("_id nombre email")
+      .sort({ nombre: 1 })
+      .exec();
+    res.json({
+      technicians: technicians.map((technician) => ({
+        id: technician._id.toString(),
+        nombre: technician.nombre,
+        email: technician.email
+      }))
+    });
+  }
+);
+
+workOrdersRouter.get(
+  "/:id/auditoria",
+  requireRole("SUPERVISOR"),
+  async (req, res) => {
+    const entries = await AuditLogModel.find({
+      tenant_id: req.tenantId,
+      resource: "ordenes_trabajo",
+      resource_id: req.params.id
+    })
+      .sort({ occurred_at: -1 })
+      .limit(100)
+      .exec();
+    res.json({
+      entries: entries.map((entry) => ({
+        id: entry._id.toString(),
+        actor_id: entry.actor_id,
+        action: entry.action,
+        resource_id: entry.resource_id,
+        values_before: entry.values_before,
+        values_after: entry.values_after,
+        occurred_at: entry.occurred_at.toISOString()
+      }))
+    });
+  }
+);
 
 workOrdersRouter.post(
   "/",

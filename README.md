@@ -17,3 +17,16 @@ y ejecuta `pnpm --filter backend seed`. El seed crea el tenant
 prueba; todos los usuarios reciben la contraseña definida en `SEED_PASSWORD`.
 Configura `POWERSYNC_URL` y `POWERSYNC_PRIVATE_KEY` para habilitar la emisión de
 tokens de PowerSync, y `GEMINI_API_KEY` para habilitar SIGMA Copilot.
+
+## Web y móvil
+
+`pnpm dev` levanta el backend, panel Vite (`5173`) y cliente Expo. Copia
+`.env.example` a `.env` y configura MongoDB antes de iniciar el backend. El
+panel puede apuntar a otra API mediante `VITE_API_URL`; Expo usa
+`EXPO_PUBLIC_API_URL` (en Android Emulator el valor predeterminado es
+`http://10.0.2.2:3000`). La app móvil requiere un development build de Expo
+porque PowerSync usa SQLite nativo; instala el build en el dispositivo y luego
+ejecuta `pnpm --filter @sigma/mobile dev`.
+
+El monorepo verifica todos los paquetes con `pnpm typecheck` y construye el
+panel y los bundles Expo con `pnpm build`.

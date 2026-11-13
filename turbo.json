@@ -1,5 +1,17 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": [
+    "PORT",
+    "MONGODB_URI",
+    "JWT_SECRET",
+    "POWERSYNC_URL",
+    "POWERSYNC_PRIVATE_KEY",
+    "GEMINI_API_KEY",
+    "CORS_ORIGIN",
+    "SEED_PASSWORD",
+    "VITE_API_URL",
+    "EXPO_PUBLIC_API_URL"
+  ],
   "tasks": {
     "dev": {
       "cache": false,

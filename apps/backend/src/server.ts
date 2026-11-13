@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { initializeMongoIndexes } from "@sigma/db-sync";
 import { app } from "./app.js";
 import { env } from "./config/env.js";
 
@@ -8,6 +9,7 @@ const server = app.listen(env.PORT, () => {
 
 try {
   await mongoose.connect(env.MONGODB_URI);
+  await initializeMongoIndexes();
   console.log("Conexión a MongoDB establecida");
 } catch (error) {
   server.close();

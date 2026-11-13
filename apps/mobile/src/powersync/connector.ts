@@ -6,12 +6,15 @@ import type {
 import type { SigmaApiClient } from "@sigma/api-client";
 
 export class SigmaPowerSyncConnector implements PowerSyncBackendConnector {
-  constructor(private readonly api: SigmaApiClient) {}
+  constructor(
+    private readonly api: SigmaApiClient,
+    private readonly endpointOverride?: string
+  ) {}
 
   async fetchCredentials(): Promise<PowerSyncCredentials> {
     const credentials = await this.api.getPowerSyncToken();
     return {
-      endpoint: credentials.endpoint,
+      endpoint: this.endpointOverride ?? credentials.endpoint,
       token: credentials.token
     };
   }

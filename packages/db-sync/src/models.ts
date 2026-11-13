@@ -240,3 +240,15 @@ export const MutationReceiptModel = model(
   mutationReceiptSchema,
   "mutation_receipts"
 );
+
+export async function initializeMongoIndexes(): Promise<void> {
+  await Promise.all([
+    OrganizationModel.init(),
+    UserModel.init(),
+    AssetModel.init(),
+    AnomalyModel.init(),
+    WorkOrderModel.init(),
+    AuditLogModel.init(),
+    MutationReceiptModel.init()
+  ]);
+}

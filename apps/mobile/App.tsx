@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Alert,
   FlatList,
@@ -22,8 +22,7 @@ import { hasPermission } from "@sigma/shared";
 import type { Anomaly, WorkOrder } from "@sigma/shared";
 import type { AuthResponse } from "@sigma/api-client";
 import { api } from "./src/api";
-import { powerSync } from "./src/powersync/database";
-import { SigmaPowerSyncConnector } from "./src/powersync/connector";
+import { offlineRepository } from "./src/offline/repository";
 
 type Screen = "assets" | "report" | "orders";
 type AssetRow = {
@@ -47,7 +46,6 @@ const colors = {
   blue: "#82c5df",
   border: "#40515a"
 };
-const tenantSql = "tenant_id = ?";
 
 export default function App() {
   const [session, setSession] = useState<AuthResponse["user"] | null>(null);
@@ -68,8 +66,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [copilotAnswer, setCopilotAnswer] = useState("");
   const [copilotPrompt, setCopilotPrompt] = useState("");
-  const syncConnected = useRef(false);
-  const syncConnecting = useRef(false);
+  const [syncMode, setSyncMode] = useState<"powersync" | "storage">("storage");
 
   const canCreateAnomaly = session
     ? hasPermission(session.role, "anomalies", "create")
@@ -83,27 +80,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!session || !online || syncConnected.current) return;
-    void connectSync().catch((error: unknown) => {
-      console.warn("No se pudo reconectar PowerSync", error);
-    });
-  }, [session, online]);
+    if (!session) return;
+    if (online) {
+      void offlineRepository.syncPending(api, session.tenant_id).then(async () => {
+        setPendingReports(await offlineRepository.getPendingCount(session.tenant_id));
+      }).catch((error: unknown) => {
+        console.warn("No se pudo sincronizar la cola offline", error);
+      });
+      if (syncMode === "storage") {
+        void refreshStorageCache(session.tenant_id, session.userId);
+      }
+    }
+  }, [session, online, syncMode]);
 
   useEffect(() => {
     let active = true;
     async function restoreSession() {
-      const token = await SecureStore.getItemAsync("sigma.jwt");
-      const rawUser = await SecureStore.getItemAsync("sigma.user");
+      const token = await readSessionValue("sigma.jwt");
+      const rawUser = await readSessionValue("sigma.user");
       if (!token || !rawUser) return;
       try {
         const user = JSON.parse(rawUser) as AuthResponse["user"];
         api.setToken(token);
+        const mode = await offlineRepository.initialize(api, user.tenant_id);
+        if (active) setSyncMode(mode);
         if (active) setSession(user);
-        try {
-          await connectSync();
-        } catch (error) {
-          console.warn("PowerSync no está disponible; se mantienen datos locales", error);
-        }
       } catch (error) {
         console.error("No se pudo restaurar sesión móvil", error);
       }
@@ -116,55 +117,27 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return;
-    let active = true;
-    const watchers: Array<AsyncIterator<{ rows?: { _array: unknown[] } }>> = [];
-    async function watchQuery<T>(
-      sql: string,
-      parameters: unknown[],
-      onRows: (rows: T[]) => void
-    ) {
-      const iterator = powerSync.watch(sql, parameters)[Symbol.asyncIterator]();
-      watchers.push(iterator);
-      try {
-        while (active) {
-          const result = await iterator.next();
-          if (result.done) return;
-          onRows((result.value.rows?._array ?? []) as T[]);
-        }
-      } catch (error) {
-        if (active) console.error("No se pudo observar una consulta PowerSync", error);
-      }
-    }
-    void watchQuery<AssetRow>(
-      `SELECT id, asset_code, qr_code, nombre, marca, modelo, status FROM activos WHERE ${tenantSql} ORDER BY asset_code`,
-      [session.tenant_id],
-      setAssets
+    return offlineRepository.subscribe(
+      session.tenant_id,
+      session.userId,
+      (data) => setAssets(data as AssetRow[]),
+      setOrders,
+      setPendingReports
     );
-    void watchQuery<WorkOrder>(
-      `SELECT id, tenant_id, anomaly_id, asset_id, title, description, priority, status, assigned_to, created_by, created_at, updated_at FROM ordenes_trabajo WHERE ${tenantSql} AND assigned_to = ? AND status != 'CERRADA' ORDER BY created_at DESC`,
-      [session.tenant_id, session.userId],
-      setOrders
-    );
-    void watchQuery<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM anomalias_locales WHERE sync_status != 'SYNCED'",
-      [],
-      (rows) => setPendingReports(rows[0]?.count ?? 0)
-    );
-    return () => {
-      active = false;
-      for (const watcher of watchers) void watcher.return?.();
-    };
-  }, [session]);
+  }, [session, syncMode]);
 
-  async function connectSync() {
-    if (syncConnected.current || syncConnecting.current) return;
-    syncConnecting.current = true;
+  async function refreshStorageCache(tenantId: string, userId: string): Promise<void> {
     try {
-      const connector = new SigmaPowerSyncConnector(api);
-      await powerSync.connect(connector);
-      syncConnected.current = true;
-    } finally {
-      syncConnecting.current = false;
+      const [assetList, workOrderList] = await Promise.all([
+        api.listAssets(),
+        api.listWorkOrders()
+      ]);
+      await offlineRepository.cacheAssets(tenantId, assetList);
+      await offlineRepository.cacheWorkOrders(tenantId, workOrderList);
+      setAssets(assetList as AssetRow[]);
+      setOrders(workOrderList.filter((order) => order.assigned_to === userId));
+    } catch (error) {
+      console.warn("No se pudo actualizar el caché del dispositivo", error);
     }
   }
 
@@ -176,13 +149,19 @@ export default function App() {
         email: email.trim(),
         password
       });
-      await SecureStore.setItemAsync("sigma.jwt", result.token);
-      await SecureStore.setItemAsync("sigma.user", JSON.stringify(result.user));
+      await writeSessionValue("sigma.jwt", result.token);
+      await writeSessionValue("sigma.user", JSON.stringify(result.user));
+      const mode = await offlineRepository.initialize(api, result.user.tenant_id);
+      setSyncMode(mode);
       setSession(result.user);
-      try {
-        await connectSync();
-      } catch (error) {
-        console.warn("PowerSync no está disponible; se mantiene sesión local", error);
+      if (mode === "storage") {
+        const [cachedAssets, cachedOrders] = await Promise.all([
+          offlineRepository.getCachedAssets(result.user.tenant_id),
+          offlineRepository.getCachedWorkOrders(result.user.tenant_id)
+        ]);
+        setAssets(cachedAssets as AssetRow[]);
+        setOrders(cachedOrders.filter((order) => order.assigned_to === result.user.userId));
+        if (online) await refreshStorageCache(result.user.tenant_id, result.user.userId);
       }
     } catch (error) {
       Alert.alert("No se pudo iniciar sesión", messageOf(error));
@@ -193,8 +172,8 @@ export default function App() {
 
   async function logout() {
     api.setToken(null);
-    await SecureStore.deleteItemAsync("sigma.jwt");
-    await SecureStore.deleteItemAsync("sigma.user");
+    await deleteSessionValue("sigma.jwt");
+    await deleteSessionValue("sigma.user");
     setSession(null);
   }
 
@@ -223,32 +202,31 @@ export default function App() {
     const createdAt = new Date().toISOString();
     setBusy(true);
     try {
-      await powerSync.execute(
-        `INSERT INTO anomalias (id, tenant_id, asset_id, reported_by, description, severity, status, created_at, client_mutation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          mutationId,
-          session.tenant_id,
-          selectedAsset.id,
-          session.userId,
-          description.trim(),
-          severity,
-          "PENDIENTE",
-          createdAt,
-          mutationId
-        ]
-      );
-      await powerSync.execute(
-        "INSERT INTO anomalias_locales (id, client_mutation_id, photo_uri, sync_status) VALUES (?, ?, ?, ?)",
-        [mutationId, mutationId, photoUri || null, "LOCAL"]
-      );
-      setPendingReports((count) => count + 1);
+      await offlineRepository.saveAnomaly({
+        id: mutationId,
+        tenant_id: session.tenant_id,
+        reported_by: session.userId,
+        asset_id: selectedAsset.id,
+        description: description.trim(),
+        severity,
+        client_mutation_id: mutationId,
+        created_at: createdAt,
+        photo_uri: photoUri || undefined
+      });
+      if (online && syncMode === "storage") {
+        await offlineRepository.syncPending(api, session.tenant_id);
+      }
+      const pendingCount = await offlineRepository.getPendingCount(session.tenant_id);
+      setPendingReports(pendingCount);
       setDescription("");
       setPhotoUri("");
       Alert.alert(
         "Reporte guardado",
-        online
-          ? "El reporte quedó guardado en el dispositivo y se enviará mediante PowerSync."
-          : "El reporte quedó guardado localmente. PowerSync lo enviará al recuperar conexión."
+        pendingCount === 0
+          ? "El reporte se guardó y sincronizó correctamente."
+          : online && syncMode === "powersync"
+            ? "El reporte quedó guardado localmente y se enviará mediante PowerSync."
+            : "El reporte quedó guardado localmente y se enviará al recuperar la conexión."
       );
     } catch (error) {
       Alert.alert("No se pudo guardar el reporte", messageOf(error));
@@ -323,7 +301,7 @@ export default function App() {
         <>
           <View style={styles.header}>
             <View><Text style={styles.headerTitle}>SIGMA <Text style={styles.headerSub}>TERRENO</Text></Text><Text style={styles.headerUser}>{session.nombre} · {session.rol}</Text></View>
-            <View style={[styles.networkBadge, online ? styles.online : styles.offline]}><View style={[styles.networkDot, online ? styles.onlineDot : styles.offlineDot]} /><Text style={styles.networkText}>{online ? "ONLINE" : "OFFLINE"}</Text></View>
+            <View style={[styles.networkBadge, online ? styles.online : styles.offline]}><View style={[styles.networkDot, online ? styles.onlineDot : styles.offlineDot]} /><Text style={styles.networkText}>{syncMode === "powersync" ? "POWERSYNC" : online ? "ONLINE · COLA LOCAL" : "OFFLINE"}</Text></View>
           </View>
           <View style={styles.tabs}>
             <TabButton label="Activos / QR" active={screen === "assets"} onPress={() => setScreen("assets")} />
@@ -404,6 +382,32 @@ function severityColor(value: string): string {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : "Error inesperado";
+}
+
+async function readSessionValue(key: string): Promise<string | null> {
+  if (Platform.OS === "web") {
+    return typeof localStorage === "undefined" ? null : localStorage.getItem(key);
+  }
+  return SecureStore.getItemAsync(key);
+}
+
+async function writeSessionValue(key: string, value: string): Promise<void> {
+  if (Platform.OS === "web") {
+    if (typeof localStorage === "undefined") {
+      throw new Error("localStorage no está disponible");
+    }
+    localStorage.setItem(key, value);
+    return;
+  }
+  await SecureStore.setItemAsync(key, value);
+}
+
+async function deleteSessionValue(key: string): Promise<void> {
+  if (Platform.OS === "web") {
+    localStorage.removeItem(key);
+    return;
+  }
+  await SecureStore.deleteItemAsync(key);
 }
 
 const styles = StyleSheet.create({

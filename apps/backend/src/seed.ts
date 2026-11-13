@@ -1,9 +1,11 @@
+import { createHmac } from "node:crypto";
 import bcrypt from "bcryptjs";
 import mongoose from "mongoose";
 import {
   AssetModel,
   OrganizationModel,
-  UserModel
+  UserModel,
+  initializeMongoIndexes
 } from "@sigma/db-sync";
 import { env } from "./config/env.js";
 
@@ -51,11 +53,7 @@ async function seed(): Promise<void> {
     throw new Error("Define SEED_PASSWORD (mínimo 12 caracteres) para ejecutar el seed");
   }
   await mongoose.connect(env.MONGODB_URI);
-  await Promise.all([
-    OrganizationModel.init(),
-    UserModel.init(),
-    AssetModel.init()
-  ]);
+  await initializeMongoIndexes();
   await OrganizationModel.updateOne(
     { tenant_id: tenantId },
     {
@@ -75,13 +73,15 @@ async function seed(): Promise<void> {
     { upsert: true }
   );
 
-  const password_hash = await bcrypt.hash(env.SEED_PASSWORD, 12);
   for (const user of roles) {
+    const password = createHmac("sha256", env.SEED_PASSWORD)
+      .update(`sigma-demo:${user.role}:${user.email}`)
+      .digest("base64url");
+    const password_hash = await bcrypt.hash(password, 12);
     await UserModel.updateOne(
       { tenant_id: tenantId, email: user.email },
       {
-        $setOnInsert: {
-          tenant_id: tenantId,
+        $set: {
           email: user.email,
           nombre: user.nombre,
           role: user.role,
@@ -105,9 +105,16 @@ async function seed(): Promise<void> {
       { upsert: true }
     );
   }
-  console.log(
-    `Seed SIGMA listo: tenant ${tenantId}; usuarios ${roles.map(({ email }) => email).join(", ")}`
-  );
+  console.log(`Seed SIGMA listo (idempotente) · tenant ${tenantId}`);
+  console.log("Credenciales demo (deterministas desde SEED_PASSWORD):");
+  for (const user of roles) {
+    const password = createHmac("sha256", env.SEED_PASSWORD)
+      .update(`sigma-demo:${user.role}:${user.email}`)
+      .digest("base64url");
+    console.log(`  ${user.role}: ${user.email} / ${password}`);
+  }
+  console.log("Códigos QR de activos:");
+  for (const asset of assets) console.log(`  ${asset.asset_code}: ${asset.qr_code}`);
 }
 
 try {

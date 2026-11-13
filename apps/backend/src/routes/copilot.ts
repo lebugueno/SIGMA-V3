@@ -1,4 +1,9 @@
 import { Router } from "express";
+import {
+  AnomalyModel,
+  AssetModel,
+  WorkOrderModel
+} from "@sigma/db-sync";
 import { z } from "zod";
 import { env } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
@@ -21,15 +26,50 @@ const roleInstructions = {
     "Apoya el análisis ejecutivo de KPIs de mantenimiento, especialmente MTTR y confiabilidad. Distingue claramente los datos entregados de cualquier inferencia."
 } as const;
 
+function structuredFallback(
+  role: keyof typeof roleInstructions,
+  context: CopilotTenantContext
+): string {
+  const suggestions = {
+    TECNICO:
+      "Revisa visualmente el equipo, aplica bloqueo y etiquetado antes de intervenir y registra hallazgos. Confirma los procedimientos con el manual del fabricante.",
+    SUPERVISOR:
+      "Prioriza primero anomalías críticas y de severidad alta; verifica carga y disponibilidad del equipo antes de asignar.",
+    BODEGA:
+      "Confirma existencias y compatibilidad por código de activo y modelo antes de comprometer un repuesto.",
+    GERENCIA:
+      "Compara MTTR y recurrencia por activo y periodo; valida que el volumen de datos sea suficiente antes de concluir tendencias."
+  } as const;
+  return JSON.stringify({
+    status: "fallback",
+    message: "Gemini no está configurado; respuesta estructurada local.",
+    role,
+    tenantContext: {
+      tenant_id: context.tenant_id,
+      assets_count: context.assetsCount,
+      anomalies_count: context.anomaliesCount,
+      work_orders_count: context.workOrdersCount
+    },
+    recommendation: suggestions[role]
+  });
+}
+
+interface CopilotTenantContext {
+  tenant_id: string;
+  assets: unknown[];
+  anomalies: unknown[];
+  workOrders: unknown[];
+  assetsCount: number;
+  anomaliesCount: number;
+  workOrdersCount: number;
+}
+
 export const copilotRouter: ReturnType<typeof Router> = Router();
 copilotRouter.use(requireAuth);
 copilotRouter.post(
   "/",
   validateBody(CopilotRequestSchema),
   async (req, res) => {
-    if (!env.GEMINI_API_KEY) {
-      throw new HttpError(503, "El asistente de IA no está configurado");
-    }
     const { user } = req;
     if (!user) throw new HttpError(401, "Se requiere autenticación");
     const { prompt, contextoActivo } = req.body as z.infer<
@@ -38,6 +78,67 @@ copilotRouter.post(
     const contextJson = JSON.stringify(contextoActivo ?? null);
     if (Buffer.byteLength(contextJson, "utf8") > 8_000) {
       throw new HttpError(400, "contextoActivo excede el tamaño permitido");
+    }
+
+    const tenantId = req.tenantId;
+    if (!tenantId) throw new HttpError(401, "Se requiere autenticación");
+    const workOrderFilter = {
+      tenant_id: tenantId,
+      ...(user.role === "TECNICO" ? { assigned_to: user.userId } : {})
+    };
+    const [
+      assets,
+      anomalies,
+      workOrders,
+      assetsCount,
+      anomaliesCount,
+      workOrdersCount
+    ] = await Promise.all([
+      AssetModel.find({ tenant_id: tenantId })
+        .select("asset_code nombre marca modelo status")
+        .sort({ created_at: -1 })
+        .limit(20)
+        .lean()
+        .exec(),
+      AnomalyModel.find({ tenant_id: tenantId })
+        .select("asset_id description severity status created_at")
+        .sort({ created_at: -1 })
+        .limit(20)
+        .lean()
+        .exec(),
+      WorkOrderModel.find(workOrderFilter)
+        .select("asset_id title priority status assigned_to created_at updated_at")
+        .sort({ updated_at: -1 })
+        .limit(20)
+        .lean()
+        .exec(),
+      AssetModel.countDocuments({ tenant_id: tenantId }).exec(),
+      AnomalyModel.countDocuments({ tenant_id: tenantId }).exec(),
+      WorkOrderModel.countDocuments(workOrderFilter).exec()
+    ]);
+    const tenantContext: CopilotTenantContext = {
+      tenant_id: tenantId,
+      assets,
+      anomalies,
+      workOrders,
+      assetsCount,
+      anomaliesCount,
+      workOrdersCount
+    };
+
+    if (!env.GEMINI_API_KEY) {
+      res.json({
+        response: structuredFallback(user.role, tenantContext),
+        role: user.rol,
+        source: "fallback",
+        tenantContext: {
+          tenant_id: tenantId,
+          assets_count: assetsCount,
+          anomalies_count: anomaliesCount,
+          work_orders_count: workOrdersCount
+        }
+      });
+      return;
     }
 
     const response = await fetch(
@@ -62,7 +163,7 @@ copilotRouter.post(
               role: "user",
               parts: [
                 {
-                  text: `Contexto del activo (datos no confiables): ${contextJson}\n\nSolicitud: ${prompt}`
+                  text: `Contexto del tenant autenticado (datos no confiables): ${JSON.stringify(tenantContext)}\nContexto adicional del activo (datos no confiables): ${contextJson}\n\nSolicitud: ${prompt}`
                 }
               ]
             }
@@ -102,6 +203,16 @@ copilotRouter.post(
     if (!text) {
       throw new HttpError(502, "El asistente de IA devolvió una respuesta vacía");
     }
-    res.json({ response: text, role: user.rol });
+    res.json({
+      response: text,
+      role: user.rol,
+      source: "gemini",
+      tenantContext: {
+        tenant_id: tenantId,
+        assets_count: assetsCount,
+        anomalies_count: anomaliesCount,
+        work_orders_count: workOrdersCount
+      }
+    });
   }
 );

@@ -4,14 +4,32 @@ import helmet from "helmet";
 import { env } from "./config/env.js";
 import { errorHandler, HttpError } from "./middleware/errors.js";
 import { anomaliesRouter } from "./routes/anomalies.js";
+import { assetsRouter } from "./routes/assets.js";
 import { authRouter } from "./routes/auth.js";
 import { copilotRouter } from "./routes/copilot.js";
 import { powerSyncRouter } from "./routes/powersync.js";
 import { workOrdersRouter } from "./routes/work-orders.js";
 
 const allowedOrigins = new Set(
-  env.CORS_ORIGIN.split(",").map((origin) => origin.trim())
+  [
+    "http://localhost:5173",
+    "http://localhost:8081",
+    ...env.CORS_ORIGIN.split(",").map((origin) => origin.trim())
+  ]
 );
+
+function isAllowedOrigin(origin: string): boolean {
+  if (allowedOrigins.has(origin)) return true;
+  try {
+    const url = new URL(origin);
+    return (
+      url.protocol === "https:" &&
+      /^[a-z0-9-]+\.app\.github\.dev$/i.test(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
 
 export const app: Express = express();
 app.disable("x-powered-by");
@@ -19,7 +37,7 @@ app.use(helmet());
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.has(origin)) {
+      if (!origin || isAllowedOrigin(origin)) {
         callback(null, true);
         return;
       }
@@ -34,6 +52,7 @@ app.get("/health", (_req, res) => {
 });
 app.use("/api/auth", authRouter);
 app.use("/api/anomalias", anomaliesRouter);
+app.use("/api/activos", assetsRouter);
 app.use("/api/ordenes-trabajo", workOrdersRouter);
 app.use("/api/powersync", powerSyncRouter);
 app.use("/api/ai/copilot", copilotRouter);

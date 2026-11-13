@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "pnpm --filter @sigma/api-client... build && turbo run dev",
     "build": "turbo run build",
-    "typecheck": "turbo run typecheck"
+    "typecheck": "turbo run typecheck",
+    "test:e2e": "pnpm --filter backend... build && node scripts/verify-e2e.mjs"
   },
   "devDependencies": {
     "turbo": "^2.5.0",

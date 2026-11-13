@@ -1,4 +1,4 @@
-import type { Anomaly, UserRole, WorkOrder } from "@sigma/shared";
+import type { Anomaly, Asset, UserRole, WorkOrder } from "@sigma/shared";
 
 export interface AuthUser {
   userId: string;
@@ -116,6 +116,11 @@ export class SigmaApiClient {
       "/api/anomalias"
     );
     return response.anomalies;
+  }
+
+  async listAssets(): Promise<Asset[]> {
+    const response = await this.request<{ assets: Asset[] }>("/api/activos");
+    return response.assets;
   }
 
   async createAnomaly(input: CreateAnomalyInput): Promise<{

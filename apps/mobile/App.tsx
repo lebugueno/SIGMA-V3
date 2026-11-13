@@ -24,7 +24,7 @@ import type { AuthResponse } from "@sigma/api-client";
 import { api } from "./src/api";
 import { offlineRepository } from "./src/offline/repository";
 
-type Screen = "assets" | "report" | "orders";
+type Screen = "assets" | "report" | "orders" | "pending";
 type AssetRow = {
   id: string;
   asset_code: string;
@@ -55,6 +55,9 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [assets, setAssets] = useState<AssetRow[]>([]);
   const [pendingReports, setPendingReports] = useState(0);
+  const [pendingItems, setPendingItems] = useState<
+    Awaited<ReturnType<typeof offlineRepository.getPendingReports>>
+  >([]);
   const [orders, setOrders] = useState<WorkOrder[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<AssetRow | null>(null);
   const [description, setDescription] = useState("");
@@ -64,6 +67,7 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [copilotAnswer, setCopilotAnswer] = useState("");
   const [copilotPrompt, setCopilotPrompt] = useState("");
   const [syncMode, setSyncMode] = useState<"powersync" | "storage">("storage");
@@ -83,7 +87,9 @@ export default function App() {
     if (!session) return;
     if (online) {
       void offlineRepository.syncPending(api, session.tenant_id).then(async () => {
-        setPendingReports(await offlineRepository.getPendingCount(session.tenant_id));
+        const reports = await offlineRepository.getPendingReports(session.tenant_id);
+        setPendingItems(reports);
+        setPendingReports(reports.length);
       }).catch((error: unknown) => {
         console.warn("No se pudo sincronizar la cola offline", error);
       });
@@ -122,7 +128,8 @@ export default function App() {
       session.userId,
       (data) => setAssets(data as AssetRow[]),
       setOrders,
-      setPendingReports
+      setPendingReports,
+      setPendingItems
     );
   }, [session, syncMode]);
 
@@ -217,6 +224,7 @@ export default function App() {
         await offlineRepository.syncPending(api, session.tenant_id);
       }
       const pendingCount = await offlineRepository.getPendingCount(session.tenant_id);
+      setPendingItems(await offlineRepository.getPendingReports(session.tenant_id));
       setPendingReports(pendingCount);
       setDescription("");
       setPhotoUri("");
@@ -246,6 +254,33 @@ export default function App() {
       setCopilotPrompt("");
     } catch (error) {
       setCopilotAnswer(messageOf(error));
+    }
+  }
+
+  async function synchronizeNow() {
+    if (!session) return;
+    if (!online) {
+      Alert.alert("Sin conexión", "Conéctate a internet para sincronizar los reportes pendientes.");
+      return;
+    }
+    setSyncing(true);
+    try {
+      await offlineRepository.synchronizeNow(api, session.tenant_id);
+      const reports = await offlineRepository.getPendingReports(session.tenant_id);
+      setPendingItems(reports);
+      setPendingReports(reports.length);
+      Alert.alert(
+        syncMode === "powersync" ? "Sincronización solicitada" : "Sincronización finalizada",
+        syncMode === "powersync"
+          ? "PowerSync recibió la solicitud. La bandeja se actualizará conforme avance la sincronización."
+          : reports.length === 0
+            ? "Todos los reportes pendientes se sincronizaron."
+            : `Quedan ${reports.length} reporte${reports.length === 1 ? "" : "s"} pendiente${reports.length === 1 ? "" : "s"}. Puedes volver a intentarlo.`
+      );
+    } catch (error) {
+      Alert.alert("No se pudo sincronizar", messageOf(error));
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -307,6 +342,7 @@ export default function App() {
             <TabButton label="Activos / QR" active={screen === "assets"} onPress={() => setScreen("assets")} />
             <TabButton label="Reportar" active={screen === "report"} onPress={() => setScreen("report")} />
             <TabButton label="Mis OTs" active={screen === "orders"} onPress={() => setScreen("orders")} />
+            <TabButton label={`Pendientes (${pendingReports})`} active={screen === "pending"} onPress={() => setScreen("pending")} />
           </View>
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             {screen === "assets" && (
@@ -346,6 +382,18 @@ export default function App() {
               <>
                 <Text style={styles.eyebrow}>TRABAJO ASIGNADO</Text><Text style={styles.sectionTitle}>Mis órdenes de trabajo</Text>
                 <FlatList data={orders} keyExtractor={(item) => item.id} scrollEnabled={false} ListEmptyComponent={<EmptyState text="No hay órdenes asignadas en este dispositivo." />} renderItem={({ item }) => <View style={styles.orderCard}><View style={styles.orderTop}><Text style={styles.orderAsset}>{item.asset_id}</Text><Text style={[styles.orderPriority, { color: severityColor(item.priority) }]}>{item.priority}</Text></View><Text style={styles.orderTitle}>{item.title}</Text><Text style={styles.orderDescription}>{item.description}</Text><Text style={styles.orderStatus}>{item.status.replaceAll("_", " ")}</Text><TouchableOpacity style={styles.quickCopilot} onPress={() => { setSelectedAsset(assets.find((asset) => asset.id === item.asset_id) ?? null); setScreen("report"); }}><Text style={styles.quickCopilotText}>Diagnóstico con SIGMA Copilot →</Text></TouchableOpacity></View>} />
+              </>
+            )}
+            {screen === "pending" && (
+              <>
+                <View style={styles.sectionTitleRow}><View><Text style={styles.eyebrow}>SINCRONIZACIÓN OFFLINE</Text><Text style={styles.sectionTitle}>Bandeja de pendientes</Text></View><Text style={styles.countBadge}>{pendingReports}</Text></View>
+                <Text style={styles.helper}>Reportes guardados en este dispositivo que todavía no se han sincronizado.</Text>
+                <TouchButton title={syncing ? "Sincronizando…" : "Sincronizar ahora"} onPress={() => void synchronizeNow()} disabled={syncing || !online || pendingReports === 0} />
+                {!online && <Text style={styles.syncHint}>Necesitas conexión a internet para sincronizar.</Text>}
+                {pendingItems.length === 0 ? <EmptyState text="No hay reportes pendientes." /> : pendingItems.map((item) => {
+                  const asset = assets.find((candidate) => candidate.id === item.asset_id);
+                  return <View style={styles.pendingCard} key={item.id}><View style={styles.orderTop}><Text style={styles.orderAsset}>{asset ? `${asset.asset_code} · ${asset.nombre}` : item.asset_id}</Text><Text style={[styles.orderPriority, { color: severityColor(item.severity) }]}>{item.severity}</Text></View><Text style={styles.orderDescription}>{item.description}</Text><Text style={styles.pendingDate}>Guardado {new Date(item.created_at).toLocaleString("es-CL")}</Text></View>;
+                })}
               </>
             )}
             <View style={styles.copilotCard}><Text style={styles.eyebrow}>ASISTENTE DE TERRENO</Text><Text style={styles.copilotHeading}>SIGMA Copilot</Text><Text style={styles.helper}>Diagnóstico técnico adaptado a tu rol.</Text><TextInput style={styles.input} value={copilotPrompt} onChangeText={setCopilotPrompt} placeholder="Pregunta sobre este activo…" placeholderTextColor={colors.muted} /><TouchButton title="Consultar asistente" onPress={() => void askCopilot()} disabled={!copilotPrompt.trim()} />{!!copilotAnswer && <Text style={styles.copilotAnswer}>{copilotAnswer}</Text>}</View>
@@ -537,6 +585,7 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     letterSpacing: 0.6
   },
+  syncHint: { color: colors.amber, fontSize: 11 },
   assetCard: {
     minHeight: 76,
     backgroundColor: colors.surface,
@@ -622,6 +671,15 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     backgroundColor: colors.surface
   },
+  pendingCard: {
+    marginTop: 2,
+    padding: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface
+  },
+  pendingDate: { color: colors.muted, fontSize: 10, marginTop: 9 },
   orderTop: { flexDirection: "row", justifyContent: "space-between" },
   orderAsset: { color: colors.lime, fontWeight: "900", fontSize: 10 },
   orderPriority: { fontWeight: "900", fontSize: 10 },

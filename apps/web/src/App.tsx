@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -28,6 +28,24 @@ const api = new SigmaApiClient({
 });
 
 type View = "overview" | "anomalies" | "workOrders" | "inventory" | "analytics";
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+};
+
+function createChatMessage(
+  role: ChatMessage["role"],
+  content: string
+): ChatMessage {
+  return {
+    id: globalThis.crypto?.randomUUID?.() ?? `chat-${Date.now()}-${Math.random()}`,
+    role,
+    content,
+    timestamp: new Date().toISOString()
+  };
+}
 
 const roleNames: Record<UserRole, string> = {
   TECNICO: "Técnico",
@@ -53,6 +71,85 @@ function messageOf(error: unknown): string {
     return "Acceso denegado (403): tu rol no tiene permiso para esta acción.";
   }
   return error instanceof Error ? error.message : "Ocurrió un error inesperado";
+}
+
+type AuditSnapshot = Record<string, unknown>;
+
+const auditFields = [
+  ["title", "Título"],
+  ["description", "Descripción"],
+  ["asset_id", "Activo"],
+  ["priority", "Prioridad"],
+  ["status", "Estado"],
+  ["assigned_to", "Asignado a"]
+] as const;
+
+function auditSnapshot(value: unknown): AuditSnapshot | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as AuditSnapshot)
+    : null;
+}
+
+function formatAuditValue(
+  field: (typeof auditFields)[number][0],
+  value: unknown,
+  entry: AuditEntry
+): string {
+  if (field === "assigned_to") {
+    if (typeof value !== "string" || !value) return "Sin asignar";
+    return entry.user_names?.[value] ?? value;
+  }
+  if (field === "asset_id") {
+    const label = [entry.asset_name, entry.asset_code].filter(Boolean).join(" · ");
+    return label || (typeof value === "string" ? value : "Sin activo");
+  }
+  if (typeof value !== "string" || !value) return "—";
+  if (field === "priority") {
+    const labels: Record<string, string> = {
+      ALTA: "Alta",
+      MEDIA: "Media",
+      BAJA: "Baja"
+    };
+    return labels[value] ?? value;
+  }
+  if (field === "status") {
+    const labels: Record<string, string> = {
+      PENDIENTE: "Pendiente",
+      ASIGNADA: "Asignada",
+      EN_PROGRESO: "En progreso",
+      CERRADA: "Cerrada"
+    };
+    return labels[value] ?? value;
+  }
+  return value;
+}
+
+function auditChanges(entry: AuditEntry) {
+  const before = auditSnapshot(entry.values_before);
+  const after = auditSnapshot(entry.values_after);
+  if (!after) return [];
+  return auditFields.flatMap(([field, label]) => {
+    const hasPrevious = Boolean(
+      before && Object.prototype.hasOwnProperty.call(before, field)
+    );
+    const hasNext = Object.prototype.hasOwnProperty.call(after, field);
+    if (!hasPrevious && !hasNext) return [];
+    const previousValue = before?.[field];
+    const nextValue = after[field];
+    if (
+      hasPrevious &&
+      JSON.stringify(previousValue) === JSON.stringify(nextValue)
+    ) {
+      return [];
+    }
+    return [{
+      label,
+      ...(hasPrevious
+        ? { before: formatAuditValue(field, previousValue, entry) }
+        : {}),
+      after: formatAuditValue(field, nextValue, entry)
+    }];
+  });
 }
 
 function Login({ onLogin }: { onLogin: (result: AuthResponse) => void }) {
@@ -115,10 +212,25 @@ function App() {
   const [auditFor, setAuditFor] = useState<string | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [copilotPrompt, setCopilotPrompt] = useState("");
-  const [copilotResponse, setCopilotResponse] = useState("");
+  const [messages, setMessages] = useState<ChatMessage[]>(() => [
+    createChatMessage(
+      "assistant",
+      `Hola, ${user?.nombre.split(" ")[0] ?? ""}. ¿En qué puedo ayudarte con tus operaciones hoy?`
+    )
+  ]);
+  const [copilotBusy, setCopilotBusy] = useState(false);
+  const copilotBusyRef = useRef(false);
+  const copilotMessagesRef = useRef<HTMLDivElement | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+
+  useEffect(() => {
+    copilotMessagesRef.current?.scrollTo({
+      top: copilotMessagesRef.current.scrollHeight,
+      behavior: "smooth"
+    });
+  }, [messages, copilotBusy]);
 
   const supervisor = user?.role === "SUPERVISOR";
   const canManageOrders = user ? hasPermission(user.role, "workOrders", "create") : false;
@@ -208,14 +320,37 @@ function App() {
 
   async function sendCopilot(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!copilotPrompt.trim()) return;
+    const prompt = copilotPrompt.trim();
+    if (!prompt || copilotBusyRef.current) return;
+    copilotBusyRef.current = true;
+    setCopilotBusy(true);
+    setMessages((current) => [...current, createChatMessage("user", prompt)]);
+    setCopilotPrompt("");
     try {
-      const result = await api.copilot({ prompt: copilotPrompt });
-      setCopilotResponse(result.response);
-      setCopilotPrompt("");
+      const result = await api.copilot({ prompt });
+      setMessages((current) => [
+        ...current,
+        createChatMessage("assistant", result.response)
+      ]);
     } catch (requestError) {
-      setCopilotResponse(messageOf(requestError));
+      setMessages((current) => [
+        ...current,
+        createChatMessage("assistant", messageOf(requestError))
+      ]);
+    } finally {
+      copilotBusyRef.current = false;
+      setCopilotBusy(false);
     }
+  }
+
+  function clearCopilotChat() {
+    if (copilotBusyRef.current) return;
+    setMessages([
+      createChatMessage(
+        "assistant",
+        `Hola, ${user?.nombre.split(" ")[0] ?? ""}. ¿En qué puedo ayudarte con tus operaciones hoy?`
+      )
+    ]);
   }
 
   if (!user) return <Login onLogin={login} />;
@@ -283,10 +418,13 @@ function App() {
         </div>
       </main>
 
-      {copilotOpen && <aside className="copilot-panel"><div className="copilot-header"><div className="copilot-title"><span className="copilot-icon"><Bot size={20} /></span><span><b>SIGMA Copilot</b><small>Asistente para {roleNames[user.role]}</small></span></div><button className="icon-button" aria-label="Cerrar Copilot" onClick={() => setCopilotOpen(false)}><X size={19} /></button></div><div className="copilot-context"><span className="status-dot" />Contexto adaptado al rol autenticado</div><div className="copilot-messages"><div className="assistant-bubble"><MessageSquareText size={17} /><p>Hola, {user.nombre.split(" ")[0]}. ¿En qué puedo ayudarte con tus operaciones hoy?</p></div>{copilotResponse && <div className="assistant-bubble response-bubble"><p>{copilotResponse}</p></div>}</div><form className="copilot-compose" onSubmit={(event) => void sendCopilot(event)}><textarea value={copilotPrompt} onChange={(event) => setCopilotPrompt(event.target.value)} placeholder="Pregunta sobre tus operaciones…" rows={3} /><button className="primary-button" aria-label="Enviar mensaje"><Send size={17} /></button></form><p className="copilot-disclaimer">La IA puede cometer errores. Verifica recomendaciones críticas.</p></aside>}
+      {copilotOpen && <aside className="copilot-panel"><div className="copilot-header"><div className="copilot-title"><span className="copilot-icon"><Bot size={20} /></span><span><b>SIGMA Copilot</b><small>Asistente para {roleNames[user.role]}</small></span></div><div className="copilot-header-actions"><button className="copilot-clear" type="button" onClick={clearCopilotChat} disabled={copilotBusy}>Limpiar chat</button><button className="icon-button" aria-label="Cerrar Copilot" onClick={() => setCopilotOpen(false)}><X size={19} /></button></div></div><div className="copilot-context"><span className="status-dot" />Contexto adaptado al rol autenticado</div><div className="copilot-messages" ref={copilotMessagesRef} aria-live="polite">{messages.map((message) => <div className={`chat-message ${message.role === "user" ? "user-message" : "assistant-message"}`} key={message.id}>{message.role === "assistant" && <MessageSquareText size={17} />}<div className="chat-message-content"><p>{message.content}</p><time>{new Intl.DateTimeFormat("es-CL", { hour: "2-digit", minute: "2-digit" }).format(new Date(message.timestamp))}</time></div></div>)}{copilotBusy && <div className="chat-message assistant-message copilot-thinking" role="status"><span className="thinking-indicator" /><span>Analizando operaciones...</span></div>}<div className="copilot-chat-end" /></div><form className="copilot-compose" onSubmit={(event) => void sendCopilot(event)}><textarea value={copilotPrompt} onChange={(event) => setCopilotPrompt(event.target.value)} placeholder="Pregunta sobre tus operaciones…" rows={3} /><button className="primary-button" aria-label="Enviar mensaje" disabled={copilotBusy || !copilotPrompt.trim()}><Send size={17} /></button></form><p className="copilot-disclaimer">La IA puede cometer errores. Verifica recomendaciones críticas.</p></aside>}
 
       {createOpen && <CreateOrderModal assets={assets} anomalies={anomalies} technicians={technicians} onClose={() => setCreateOpen(false)} onCreated={async () => { setCreateOpen(false); await refresh(); }} />}
-      {auditFor && <div className="modal-backdrop" onClick={() => setAuditFor(null)}><section className="audit-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">REGISTRO APPEND-ONLY</p><h2>Historial de auditoría</h2></div><button className="icon-button" onClick={() => setAuditFor(null)} aria-label="Cerrar"><X /></button></div>{audit.map((entry) => <article className="audit-entry" key={entry.id}><div className="audit-meta"><b>{entry.action === "CREATE" ? "Orden creada" : "Orden actualizada"}</b><time>{new Date(entry.occurred_at).toLocaleString("es-CL")}</time></div><p>Usuario: {entry.actor_id}</p><details><summary>Valores antes y después</summary><pre>{JSON.stringify({ antes: entry.values_before, después: entry.values_after }, null, 2)}</pre></details></article>)}{audit.length === 0 && <p className="muted">No hay eventos de auditoría para esta orden.</p>}</section></div>}
+      {auditFor && <div className="modal-backdrop" onClick={() => setAuditFor(null)}><section className="audit-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">REGISTRO APPEND-ONLY</p><h2>Historial de auditoría</h2></div><button className="icon-button" onClick={() => setAuditFor(null)} aria-label="Cerrar"><X /></button></div>{audit.map((entry) => {
+        const changes = auditChanges(entry);
+        return <article className="audit-entry" key={entry.id}><div className="audit-meta"><b>{entry.action === "CREATE" ? "Orden creada" : "Orden actualizada"}</b><time>{new Date(entry.occurred_at).toLocaleString("es-CL")}</time></div><p className="audit-context"><span>Usuario: <strong>{entry.actor_name ?? entry.actor_id}</strong></span><span>Activo: <strong>{[entry.asset_name, entry.asset_code].filter(Boolean).join(" · ") || "No disponible"}</strong></span></p>{changes.length > 0 ? <ul className="audit-changes">{changes.map((change) => <li key={change.label}><b>{change.label}</b><span>{change.before !== undefined ? `${change.before} → ${change.after}` : change.after}</span></li>)}</ul> : <p className="muted">No hay cambios detallados disponibles.</p>}<details><summary>Ver datos técnicos (JSON)</summary><pre>{JSON.stringify({ antes: entry.values_before, después: entry.values_after }, null, 2)}</pre></details></article>;
+      })}{audit.length === 0 && <p className="muted">No hay eventos de auditoría para esta orden.</p>}</section></div>}
     </div>
   );
 }

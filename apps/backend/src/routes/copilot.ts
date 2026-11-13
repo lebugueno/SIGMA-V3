@@ -5,7 +5,6 @@ import {
   WorkOrderModel
 } from "@sigma/db-sync";
 import { z } from "zod";
-import { env } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
 import { HttpError } from "../middleware/errors.js";
 import { validateBody } from "../middleware/validate.js";
@@ -26,32 +25,103 @@ const roleInstructions = {
     "Apoya el análisis ejecutivo de KPIs de mantenimiento, especialmente MTTR y confiabilidad. Distingue claramente los datos entregados de cualquier inferencia."
 } as const;
 
-function structuredFallback(
+function contextValue(entry: unknown, key: string): string {
+  if (typeof entry !== "object" || entry === null || !(key in entry)) {
+    return "";
+  }
+  const value = (entry as Record<string, unknown>)[key];
+  return typeof value === "string" || typeof value === "number"
+    ? String(value)
+    : "";
+}
+
+function fallbackResponse(
   role: keyof typeof roleInstructions,
   context: CopilotTenantContext
 ): string {
   const suggestions = {
     TECNICO:
-      "Revisa visualmente el equipo, aplica bloqueo y etiquetado antes de intervenir y registra hallazgos. Confirma los procedimientos con el manual del fabricante.",
+      "Para el trabajo en terreno, atiende primero las anomalías críticas y altas. Antes de intervenir, aplica bloqueo y etiquetado, registra los hallazgos y confirma el procedimiento en el manual del fabricante.",
     SUPERVISOR:
-      "Prioriza primero anomalías críticas y de severidad alta; verifica carga y disponibilidad del equipo antes de asignar.",
+      "Prioriza las anomalías críticas y altas, y revisa la carga de las órdenes activas antes de asignar trabajo.",
     BODEGA:
-      "Confirma existencias y compatibilidad por código de activo y modelo antes de comprometer un repuesto.",
+      "Verifica stock y compatibilidad de repuestos para los activos con anomalías abiertas antes de confirmar una entrega.",
     GERENCIA:
-      "Compara MTTR y recurrencia por activo y periodo; valida que el volumen de datos sea suficiente antes de concluir tendencias."
+      "Revisa la recurrencia de anomalías y el volumen de órdenes activas por activo. Compara MTTR por periodo antes de concluir tendencias."
   } as const;
-  return JSON.stringify({
-    status: "fallback",
-    message: "Gemini no está configurado; respuesta estructurada local.",
-    role,
-    tenantContext: {
-      tenant_id: context.tenant_id,
-      assets_count: context.assetsCount,
-      anomalies_count: context.anomaliesCount,
-      work_orders_count: context.workOrdersCount
-    },
-    recommendation: suggestions[role]
+  const anomalies = context.anomalies.slice(0, 5).map((anomaly) => {
+    const asset = contextValue(anomaly, "asset_id");
+    const severity = contextValue(anomaly, "severity");
+    const description = contextValue(anomaly, "description");
+    return `- ${severity || "Severidad no especificada"}${asset ? ` en activo ${asset}` : ""}${description ? `: ${description}` : ""}`;
   });
+  const workOrders = context.workOrders.slice(0, 5).map((order) => {
+    const title = contextValue(order, "title");
+    const asset = contextValue(order, "asset_id");
+    const status = contextValue(order, "status").replaceAll("_", " ").toLowerCase();
+    return `- ${title || "Orden sin título"}${asset ? ` · activo ${asset}` : ""}${status ? ` · ${status}` : ""}`;
+  });
+  const anomalySection =
+    context.anomaliesCount === 0
+      ? "No hay anomalías abiertas registradas."
+      : `Hay ${context.anomaliesCount} anomalía${context.anomaliesCount === 1 ? "" : "s"} abierta${context.anomaliesCount === 1 ? "" : "s"}${anomalies.length ? `; entre las más recientes:\n${anomalies.join("\n")}` : "."}`;
+  const workOrderSection =
+    context.workOrdersCount === 0
+      ? "No hay órdenes de trabajo activas."
+      : `Hay ${context.workOrdersCount} orden${context.workOrdersCount === 1 ? "" : "es"} de trabajo activa${context.workOrdersCount === 1 ? "" : "s"}${workOrders.length ? `; entre las más recientes:\n${workOrders.join("\n")}` : "."}`;
+  return `Resumen operativo del tenant:\n${anomalySection}\n${workOrderSection}\n\n${suggestions[role]}`;
+}
+
+function describeJsonValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(describeJsonValue).filter(Boolean).join("; ");
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value)
+      .map(
+        ([key, item]) =>
+          `${key.replaceAll("_", " ")}: ${describeJsonValue(item)}`
+      )
+      .filter((entry) => !entry.endsWith(": "))
+      .join(". ");
+  }
+  return "";
+}
+
+function cleanAssistantResponse(value: string): string {
+  const trimmed = value
+    .trim()
+    .replace(/^```(?:json|text)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (typeof parsed === "string") return parsed.trim();
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      const answerFields = [
+        "response",
+        "answer",
+        "message",
+        "recommendation",
+        "text",
+        "summary"
+      ];
+      const answer = answerFields
+        .map((field) => record[field])
+        .filter((field): field is string => typeof field === "string")
+        .map((field) => field.trim())
+        .filter(Boolean);
+      if (answer.length > 0) return answer.join("\n\n");
+    }
+    return describeJsonValue(parsed).trim();
+  } catch {
+    return trimmed;
+  }
 }
 
 interface CopilotTenantContext {
@@ -84,7 +154,12 @@ copilotRouter.post(
     if (!tenantId) throw new HttpError(401, "Se requiere autenticación");
     const workOrderFilter = {
       tenant_id: tenantId,
+      status: { $ne: "CERRADA" },
       ...(user.role === "TECNICO" ? { assigned_to: user.userId } : {})
+    };
+    const openAnomalyFilter = {
+      tenant_id: tenantId,
+      status: { $ne: "RESUELTA" }
     };
     const [
       assets,
@@ -100,7 +175,7 @@ copilotRouter.post(
         .limit(20)
         .lean()
         .exec(),
-      AnomalyModel.find({ tenant_id: tenantId })
+      AnomalyModel.find(openAnomalyFilter)
         .select("asset_id description severity status created_at")
         .sort({ created_at: -1 })
         .limit(20)
@@ -113,7 +188,7 @@ copilotRouter.post(
         .lean()
         .exec(),
       AssetModel.countDocuments({ tenant_id: tenantId }).exec(),
-      AnomalyModel.countDocuments({ tenant_id: tenantId }).exec(),
+      AnomalyModel.countDocuments(openAnomalyFilter).exec(),
       WorkOrderModel.countDocuments(workOrderFilter).exec()
     ]);
     const tenantContext: CopilotTenantContext = {
@@ -126,9 +201,18 @@ copilotRouter.post(
       workOrdersCount
     };
 
-    if (!env.GEMINI_API_KEY) {
+    const apiKey = process.env.GEMINI_API_KEY?.trim();
+    const googleEndpoint = apiKey?.startsWith("AQ.")
+      ? `https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`
+      : apiKey?.startsWith("AIza")
+        ? `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`
+        : undefined;
+    if (!apiKey || !googleEndpoint) {
+      if (apiKey) {
+        console.error("Prefijo de GEMINI_API_KEY no reconocido para Google Gemini");
+      }
       res.json({
-        response: structuredFallback(user.role, tenantContext),
+        response: fallbackResponse(user.role, tenantContext),
         role: user.rol,
         source: "fallback",
         tenantContext: {
@@ -141,20 +225,16 @@ copilotRouter.post(
       return;
     }
 
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-      {
+    try {
+      const response = await fetch(googleEndpoint, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-goog-api-key": env.GEMINI_API_KEY
-        },
+        headers: { "content-type": "application/json" },
         signal: AbortSignal.timeout(20_000),
         body: JSON.stringify({
           systemInstruction: {
             parts: [
               {
-                text: `Eres SIGMA Copilot. Responde en español, de forma concisa y con foco en seguridad. El rol autenticado es ${user.rol}. ${roleInstructions[user.role]}`
+                text: `Eres SIGMA Copilot. Responde únicamente en español, en lenguaje natural conciso y con foco en seguridad. No devuelvas JSON, objetos, claves técnicas ni bloques de código. El rol autenticado es ${user.rol}. ${roleInstructions[user.role]}`
               }
             ]
           },
@@ -170,49 +250,79 @@ copilotRouter.post(
           ],
           generationConfig: { temperature: 0.3, maxOutputTokens: 700 }
         })
+      });
+      const responseBody = await response.text();
+      if (response.status !== 200) {
+        console.error("Fallo de proveedor Gemini", {
+          status: response.status,
+          body: responseBody
+        });
+        res.json({
+          response: fallbackResponse(user.role, tenantContext),
+          role: user.rol,
+          source: "fallback",
+          tenantContext: {
+            tenant_id: tenantId,
+            assets_count: assetsCount,
+            anomalies_count: anomaliesCount,
+            work_orders_count: workOrdersCount
+          }
+        });
+        return;
       }
-    );
-    if (!response.ok) {
-      console.error("Fallo de proveedor Gemini", { status: response.status });
-      throw new HttpError(502, "El asistente de IA no pudo procesar la solicitud");
+      const result: unknown = JSON.parse(responseBody);
+      const generatedText =
+        typeof result === "object" &&
+        result !== null &&
+        "candidates" in result &&
+        Array.isArray(result.candidates) &&
+        typeof result.candidates[0] === "object" &&
+        result.candidates[0] !== null &&
+        "content" in result.candidates[0] &&
+        typeof result.candidates[0].content === "object" &&
+        result.candidates[0].content !== null &&
+        "parts" in result.candidates[0].content &&
+        Array.isArray(result.candidates[0].content.parts)
+          ? result.candidates[0].content.parts
+              .map((part: unknown) =>
+                typeof part === "object" &&
+                part !== null &&
+                "text" in part &&
+                typeof part.text === "string"
+                  ? part.text
+                  : ""
+              )
+              .join("")
+          : "";
+      const text = cleanAssistantResponse(generatedText);
+      if (!text) throw new Error("Gemini devolvió una respuesta vacía");
+      res.json({
+        response: text,
+        role: user.rol,
+        source: "gemini",
+        tenantContext: {
+          tenant_id: tenantId,
+          assets_count: assetsCount,
+          anomalies_count: anomaliesCount,
+          work_orders_count: workOrdersCount
+        }
+      });
+    } catch (error) {
+      console.error("Error al contactar a Google Gemini", {
+        status: null,
+        body: error instanceof Error ? error.message : String(error)
+      });
+      res.json({
+        response: fallbackResponse(user.role, tenantContext),
+        role: user.rol,
+        source: "fallback",
+        tenantContext: {
+          tenant_id: tenantId,
+          assets_count: assetsCount,
+          anomalies_count: anomaliesCount,
+          work_orders_count: workOrdersCount
+        }
+      });
     }
-    const result: unknown = await response.json();
-    const text =
-      typeof result === "object" &&
-      result !== null &&
-      "candidates" in result &&
-      Array.isArray(result.candidates) &&
-      typeof result.candidates[0] === "object" &&
-      result.candidates[0] !== null &&
-      "content" in result.candidates[0] &&
-      typeof result.candidates[0].content === "object" &&
-      result.candidates[0].content !== null &&
-      "parts" in result.candidates[0].content &&
-      Array.isArray(result.candidates[0].content.parts)
-        ? result.candidates[0].content.parts
-            .map((part: unknown) =>
-              typeof part === "object" &&
-              part !== null &&
-              "text" in part &&
-              typeof part.text === "string"
-                ? part.text
-                : ""
-            )
-            .join("")
-        : "";
-    if (!text) {
-      throw new HttpError(502, "El asistente de IA devolvió una respuesta vacía");
-    }
-    res.json({
-      response: text,
-      role: user.rol,
-      source: "gemini",
-      tenantContext: {
-        tenant_id: tenantId,
-        assets_count: assetsCount,
-        anomalies_count: anomaliesCount,
-        work_orders_count: workOrdersCount
-      }
-    });
   }
 );

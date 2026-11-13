@@ -43,8 +43,12 @@ export interface UpdateWorkOrderInput {
 export interface AuditEntry {
   id: string;
   actor_id: string;
+  actor_name?: string;
   action: string;
   resource_id: string;
+  asset_name?: string;
+  asset_code?: string;
+  user_names?: Record<string, string>;
   values_before: unknown;
   values_after: unknown;
   occurred_at: string;

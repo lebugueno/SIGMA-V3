@@ -1,6 +1,11 @@
 import mongoose from "mongoose";
 import { Router } from "express";
-import { AuditLogModel, UserModel, WorkOrderModel } from "@sigma/db-sync";
+import {
+  AssetModel,
+  AuditLogModel,
+  UserModel,
+  WorkOrderModel
+} from "@sigma/db-sync";
 import { WorkOrderSchema } from "@sigma/shared";
 import { z } from "zod";
 import { requireAuth, requirePermission, requireRole } from "../middleware/auth.js";
@@ -81,6 +86,14 @@ function serializeWorkOrder(workOrder: {
 export const workOrdersRouter: ReturnType<typeof Router> = Router();
 workOrdersRouter.use(requireAuth);
 
+function snapshotValue(snapshot: unknown, key: string): string | undefined {
+  if (typeof snapshot !== "object" || snapshot === null || !(key in snapshot)) {
+    return undefined;
+  }
+  const value = (snapshot as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 workOrdersRouter.get(
   "/",
   requirePermission("workOrders", "read"),
@@ -125,24 +138,81 @@ workOrdersRouter.get(
   "/:id/auditoria",
   requireRole("SUPERVISOR"),
   async (req, res) => {
+    const tenantId = req.tenantId;
+    if (!tenantId) throw new HttpError(401, "Se requiere autenticación");
     const entries = await AuditLogModel.find({
-      tenant_id: req.tenantId,
+      tenant_id: tenantId,
       resource: "ordenes_trabajo",
       resource_id: req.params.id
     })
       .sort({ occurred_at: -1 })
       .limit(100)
       .exec();
+    const workOrder = await WorkOrderModel.findOne({
+      tenant_id: tenantId,
+      _id: req.params.id
+    })
+      .select("asset_id")
+      .lean()
+      .exec();
+    const snapshots = entries.flatMap((entry) => [
+      entry.values_before,
+      entry.values_after
+    ]);
+    const userIds = new Set(
+      entries.map((entry) => entry.actor_id).filter(Boolean)
+    );
+    const assetIds = new Set<string>();
+    if (workOrder?.asset_id) assetIds.add(workOrder.asset_id);
+    for (const snapshot of snapshots) {
+      const assignee = snapshotValue(snapshot, "assigned_to");
+      const assetId = snapshotValue(snapshot, "asset_id");
+      if (assignee) userIds.add(assignee);
+      if (assetId) assetIds.add(assetId);
+    }
+    const [users, assets] = await Promise.all([
+      UserModel.find({ tenant_id: tenantId, _id: { $in: [...userIds] } })
+        .select("_id nombre")
+        .lean()
+        .exec(),
+      AssetModel.find({ tenant_id: tenantId, _id: { $in: [...assetIds] } })
+        .select("_id nombre asset_code")
+        .lean()
+        .exec()
+    ]);
+    const userNames = Object.fromEntries(
+      users.map((user) => [user._id.toString(), user.nombre])
+    );
+    const assetsById = new Map(
+      assets.map((asset) => [
+        asset._id.toString(),
+        { nombre: asset.nombre, codigo: asset.asset_code }
+      ])
+    );
     res.json({
-      entries: entries.map((entry) => ({
-        id: entry._id.toString(),
-        actor_id: entry.actor_id,
-        action: entry.action,
-        resource_id: entry.resource_id,
-        values_before: entry.values_before,
-        values_after: entry.values_after,
-        occurred_at: entry.occurred_at.toISOString()
-      }))
+      entries: entries.map((entry) => {
+        const afterAssetId = snapshotValue(entry.values_after, "asset_id");
+        const beforeAssetId = snapshotValue(entry.values_before, "asset_id");
+        const asset =
+          (afterAssetId ? assetsById.get(afterAssetId) : undefined) ??
+          (beforeAssetId ? assetsById.get(beforeAssetId) : undefined) ??
+          (workOrder?.asset_id
+            ? assetsById.get(workOrder.asset_id)
+            : undefined);
+        return {
+          id: entry._id.toString(),
+          actor_id: entry.actor_id,
+          actor_name: userNames[entry.actor_id],
+          action: entry.action,
+          resource_id: entry.resource_id,
+          asset_name: asset?.nombre,
+          asset_code: asset?.codigo,
+          user_names: userNames,
+          values_before: entry.values_before,
+          values_after: entry.values_after,
+          occurred_at: entry.occurred_at.toISOString()
+        };
+      })
     });
   }
 );

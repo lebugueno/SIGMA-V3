@@ -6,13 +6,21 @@ import type {
   CreateAnomalyInput,
   SigmaApiClient
 } from "@sigma/api-client";
+import { SigmaPowerSyncConnector } from "../powersync/connector";
 
 type OfflineMode = "powersync" | "storage";
-type PendingAnomaly = CreateAnomalyInput & {
+export interface PendingReport {
   id: string;
+  asset_id: string;
+  description: string;
+  severity: Anomaly["severity"];
+  created_at: string;
+}
+type PendingAnomaly = CreateAnomalyInput & {
+  id: PendingReport["id"];
   tenant_id: string;
   reported_by: string;
-  created_at: string;
+  created_at: PendingReport["created_at"];
   photo_uri?: string;
 };
 type NativeDatabase = import("@powersync/react-native").PowerSyncDatabase;
@@ -54,6 +62,7 @@ async function setValue<T>(key: string, value: T): Promise<void> {
 export class OfflineRepository {
   private mode: OfflineMode = "storage";
   private database: NativeDatabase | null = null;
+  private connector: SigmaPowerSyncConnector | null = null;
   private currentTenantId: string | null = null;
 
   get usesPowerSync(): boolean {
@@ -72,14 +81,12 @@ export class OfflineRepository {
     }
 
     try {
-      const [{ getPowerSyncDatabase }, { SigmaPowerSyncConnector }] =
-        await Promise.all([
-          import("../powersync/database"),
-          import("../powersync/connector")
-        ]);
+      const { getPowerSyncDatabase } = await import("../powersync/database");
       const database = getPowerSyncDatabase();
-      await database.connect(new SigmaPowerSyncConnector(api, powersyncUrl));
+      const connector = new SigmaPowerSyncConnector(api, powersyncUrl);
+      await database.connect(connector);
       this.database = database;
+      this.connector = connector;
       this.mode = "powersync";
     } catch (error) {
       console.warn(
@@ -87,6 +94,7 @@ export class OfflineRepository {
         error
       );
       this.database = null;
+      this.connector = null;
       this.mode = "storage";
     }
     return this.mode;
@@ -141,17 +149,35 @@ export class OfflineRepository {
   }
 
   async getPendingCount(tenantId: string): Promise<number> {
+    return (await this.getPendingReports(tenantId)).length;
+  }
+
+  async getPendingReports(tenantId: string): Promise<PendingReport[]> {
     if (this.usesPowerSync && this.database) {
-      const rows = await this.database.getAll<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM anomalias_locales WHERE sync_status != 'SYNCED'"
+      return this.database.getAll<PendingReport>(
+        "SELECT a.id, a.asset_id, a.description, a.severity, a.created_at FROM anomalias a INNER JOIN anomalias_locales l ON l.id = a.id WHERE a.tenant_id = ? AND l.sync_status != 'SYNCED' ORDER BY a.created_at DESC",
+        [tenantId]
       );
-      return rows[0]?.count ?? 0;
     }
     const queue = await getValue<PendingAnomaly[]>(
       `${storagePrefix}${tenantId}.anomaly-queue`,
       []
     );
-    return queue.length;
+    return queue.map(({ id, asset_id, description, severity, created_at }) => ({
+      id,
+      asset_id,
+      description,
+      severity,
+      created_at
+    }));
+  }
+
+  async synchronizeNow(api: SigmaApiClient, tenantId: string): Promise<void> {
+    if (this.usesPowerSync && this.database && this.connector) {
+      await this.database.connect(this.connector);
+      return;
+    }
+    await this.syncPending(api, tenantId);
   }
 
   async syncPending(api: SigmaApiClient, tenantId: string): Promise<void> {
@@ -185,7 +211,8 @@ export class OfflineRepository {
     userId: string,
     onAssets: (assets: Asset[]) => void,
     onOrders: (orders: WorkOrder[]) => void,
-    onPendingCount: (count: number) => void
+    onPendingCount: (count: number) => void,
+    onPendingReports: (reports: PendingReport[]) => void
   ): () => void {
     let active = true;
     const iterators: Array<AsyncIterator<{ rows?: { _array: unknown[] } }>> = [];
@@ -221,9 +248,14 @@ export class OfflineRepository {
         onOrders
       );
       watch<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM anomalias_locales WHERE sync_status != 'SYNCED'",
-        [],
+        "SELECT COUNT(*) AS count FROM anomalias a INNER JOIN anomalias_locales l ON l.id = a.id WHERE a.tenant_id = ? AND l.sync_status != 'SYNCED'",
+        [tenantId],
         (rows) => onPendingCount(rows[0]?.count ?? 0)
+      );
+      watch<PendingReport>(
+        "SELECT a.id, a.asset_id, a.description, a.severity, a.created_at FROM anomalias a INNER JOIN anomalias_locales l ON l.id = a.id WHERE a.tenant_id = ? AND l.sync_status != 'SYNCED' ORDER BY a.created_at DESC",
+        [tenantId],
+        onPendingReports
       );
     } else {
       void Promise.all([
@@ -231,7 +263,10 @@ export class OfflineRepository {
         this.getCachedWorkOrders(tenantId).then((orders) =>
           onOrders(orders.filter((order) => order.assigned_to === userId))
         ),
-        this.getPendingCount(tenantId).then(onPendingCount)
+        this.getPendingReports(tenantId).then((reports) => {
+          onPendingCount(reports.length);
+          onPendingReports(reports);
+        })
       ]).catch((error: unknown) =>
         console.error("No se pudo restaurar el almacenamiento offline", error)
       );

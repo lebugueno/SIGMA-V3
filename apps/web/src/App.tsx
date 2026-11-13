@@ -73,6 +73,14 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : "Ocurrió un error inesperado";
 }
 
+function assetDisplayName(assetId: string, assets: Asset[]): string {
+  const asset = assets.find(
+    (item) => (item._id ?? item.id) === assetId
+  );
+  if (!asset) return "Activo no disponible";
+  return `${asset.codigo ?? asset.asset_code} - ${asset.nombre}`;
+}
+
 type AuditSnapshot = Record<string, unknown>;
 
 const auditFields = [
@@ -90,6 +98,18 @@ function auditSnapshot(value: unknown): AuditSnapshot | null {
     : null;
 }
 
+function auditTechnicalValues(value: unknown, entry: AuditEntry): unknown {
+  const snapshot = auditSnapshot(value);
+  if (!snapshot || typeof snapshot.asset_id !== "string") return value;
+  const assetLabel = [entry.asset_code, entry.asset_name]
+    .filter(Boolean)
+    .join(" - ");
+  return {
+    ...snapshot,
+    asset_id: assetLabel || "Activo no disponible"
+  };
+}
+
 function formatAuditValue(
   field: (typeof auditFields)[number][0],
   value: unknown,
@@ -100,7 +120,7 @@ function formatAuditValue(
     return entry.user_names?.[value] ?? value;
   }
   if (field === "asset_id") {
-    const label = [entry.asset_name, entry.asset_code].filter(Boolean).join(" · ");
+    const label = [entry.asset_code, entry.asset_name].filter(Boolean).join(" - ");
     return label || (typeof value === "string" ? value : "Sin activo");
   }
   if (typeof value !== "string" || !value) return "—";
@@ -250,6 +270,7 @@ function App() {
     setLoading(true);
     setError("");
     try {
+      setAssets(await api.listAssets());
       if (hasPermission(user.role, "anomalies", "read")) {
         setAnomalies(await api.listAnomalies());
       }
@@ -257,12 +278,7 @@ function App() {
         setWorkOrders(await api.listWorkOrders());
       }
       if (user.role === "SUPERVISOR") {
-        const [tenantAssets, tenantTechnicians] = await Promise.all([
-          api.listAssets(),
-          api.listTechnicians()
-        ]);
-        setAssets(tenantAssets);
-        setTechnicians(tenantTechnicians);
+        setTechnicians(await api.listTechnicians());
       }
     } catch (requestError) {
       setError(messageOf(requestError));
@@ -287,6 +303,7 @@ function App() {
     api.setToken(null);
     localStorage.removeItem("sigma.token");
     localStorage.removeItem("sigma.user");
+    setAssets([]);
     setUser(null);
   }
 
@@ -391,21 +408,21 @@ function App() {
               <div className="metric-grid">
                 <Metric icon={AlertTriangle} label="Anomalías abiertas" value={String(openAnomalies.length).padStart(2, "0")} note="Pendientes de resolución" tone="amber" />
                 <Metric icon={ClipboardList} label={user.role === "TECNICO" ? "Mis órdenes activas" : "Órdenes activas"} value={String(assignedOrders.length).padStart(2, "0")} note="En flujo de trabajo" tone="lime" />
-                <Metric icon={Wrench} label="Activos conectados" value="—" note="Datos disponibles en catálogo" tone="blue" />
+                <Metric icon={Wrench} label="Activos conectados" value={String(assets.length).padStart(2, "0")} note="Activos registrados en catálogo" tone="blue" />
               </div>
               <div className="section-heading"><div><p className="eyebrow">PRIORIDAD OPERACIONAL</p><h2>Anomalías recientes</h2></div><button className="text-button" onClick={() => navigate("anomalies")}>Ver bandeja →</button></div>
-              <AnomalyList anomalies={anomalies.slice(0, 5)} />
+              <AnomalyList anomalies={anomalies.slice(0, 5)} assets={assets} />
               {(user.role === "BODEGA" || user.role === "GERENCIA") && <div className="placeholder-card"><div className="placeholder-icon">{user.role === "BODEGA" ? <Package /> : <Activity />}</div><div><h3>{user.role === "BODEGA" ? "Control de repuestos" : "Confiabilidad y MTTR"}</h3><p>Vista preparada para conectar el módulo de {user.role === "BODEGA" ? "inventario y compatibilidad" : "indicadores operacionales"}.</p></div><button className="secondary-button" onClick={() => navigate(user.role === "BODEGA" ? "inventory" : "analytics")}>Abrir vista</button></div>}
             </>
           )}
 
-          {view === "anomalies" && <><div className="section-heading"><div><p className="eyebrow">HU-02 · REPORTE EN TERRENO</p><h2>{anomalies.length} reportes registrados</h2></div><button className="secondary-button" onClick={() => void refresh()}>Actualizar</button></div><AnomalyList anomalies={anomalies} /></>}
+          {view === "anomalies" && <><div className="section-heading"><div><p className="eyebrow">HU-02 · REPORTE EN TERRENO</p><h2>{anomalies.length} reportes registrados</h2></div><button className="secondary-button" onClick={() => void refresh()}>Actualizar</button></div><AnomalyList anomalies={anomalies} assets={assets} /></>}
 
           {view === "workOrders" && supervisor && (
             <>
               <div className="section-heading"><div><p className="eyebrow">HU-03 · PLANIFICACIÓN Y SEGUIMIENTO</p><h2>Tablero de ejecución</h2><p className="muted">{workOrders.length} órdenes en tu organización</p></div><button className="primary-button" onClick={() => setCreateOpen(true)}><Plus size={17} />Crear orden</button></div>
               <div className="table-card"><div className="table-scroll"><table><thead><tr><th>ORDEN / ACTIVO</th><th>PRIORIDAD</th><th>ESTADO</th><th>TÉCNICO ASIGNADO</th><th>ACTUALIZACIÓN</th></tr></thead><tbody>
-                {workOrders.map((order) => <tr key={order.id}><td><b>{order.title}</b><small>{order.asset_id} · {order.description}</small><button className="audit-link" onClick={() => void showAudit(order.id)}>Ver historial de auditoría</button></td><td><select className={`table-select priority-${order.priority.toLowerCase()}`} aria-label={`Prioridad ${order.title}`} value={order.priority} onChange={(event) => void updateOrder(order.id, { priority: event.target.value as WorkOrder["priority"] })}><option value="ALTA">Alta</option><option value="MEDIA">Media</option><option value="BAJA">Baja</option></select></td><td><select className="table-select" aria-label={`Estado ${order.title}`} value={order.status} onChange={(event) => void updateOrder(order.id, { status: event.target.value as WorkOrder["status"] })}><option value="PENDIENTE">Pendiente</option><option value="ASIGNADA">Asignada</option><option value="EN_PROGRESO">En progreso</option><option value="CERRADA">Cerrada</option></select></td><td><select className="table-select" aria-label={`Técnico ${order.title}`} value={order.assigned_to ?? ""} onChange={(event) => void updateOrder(order.id, { assigned_to: event.target.value })}><option value="">Sin asignar</option>{technicians.map((technician) => <option key={technician.id} value={technician.id}>{technician.nombre}</option>)}</select></td><td>{new Date(order.updated_at).toLocaleDateString("es-CL")}</td></tr>)}
+                {workOrders.map((order) => <tr key={order.id}><td><b>{order.title}</b><small>{assetDisplayName(order.asset_id, assets)} · {order.description}</small><button className="audit-link" onClick={() => void showAudit(order.id)}>Ver historial de auditoría</button></td><td><select className={`table-select priority-${order.priority.toLowerCase()}`} aria-label={`Prioridad ${order.title}`} value={order.priority} onChange={(event) => void updateOrder(order.id, { priority: event.target.value as WorkOrder["priority"] })}><option value="ALTA">Alta</option><option value="MEDIA">Media</option><option value="BAJA">Baja</option></select></td><td><select className="table-select" aria-label={`Estado ${order.title}`} value={order.status} onChange={(event) => void updateOrder(order.id, { status: event.target.value as WorkOrder["status"] })}><option value="PENDIENTE">Pendiente</option><option value="ASIGNADA">Asignada</option><option value="EN_PROGRESO">En progreso</option><option value="CERRADA">Cerrada</option></select></td><td><select className="table-select" aria-label={`Técnico ${order.title}`} value={order.assigned_to ?? ""} onChange={(event) => void updateOrder(order.id, { assigned_to: event.target.value })}><option value="">Sin asignar</option>{technicians.map((technician) => <option key={technician.id} value={technician.id}>{technician.nombre}</option>)}</select></td><td>{new Date(order.updated_at).toLocaleDateString("es-CL")}</td></tr>)}
                 {workOrders.length === 0 && <tr><td colSpan={5} className="empty-row">Aún no hay órdenes de trabajo.</td></tr>}
               </tbody></table></div></div>
             </>
@@ -423,7 +440,7 @@ function App() {
       {createOpen && <CreateOrderModal assets={assets} anomalies={anomalies} technicians={technicians} onClose={() => setCreateOpen(false)} onCreated={async () => { setCreateOpen(false); await refresh(); }} />}
       {auditFor && <div className="modal-backdrop" onClick={() => setAuditFor(null)}><section className="audit-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">REGISTRO APPEND-ONLY</p><h2>Historial de auditoría</h2></div><button className="icon-button" onClick={() => setAuditFor(null)} aria-label="Cerrar"><X /></button></div>{audit.map((entry) => {
         const changes = auditChanges(entry);
-        return <article className="audit-entry" key={entry.id}><div className="audit-meta"><b>{entry.action === "CREATE" ? "Orden creada" : "Orden actualizada"}</b><time>{new Date(entry.occurred_at).toLocaleString("es-CL")}</time></div><p className="audit-context"><span>Usuario: <strong>{entry.actor_name ?? entry.actor_id}</strong></span><span>Activo: <strong>{[entry.asset_name, entry.asset_code].filter(Boolean).join(" · ") || "No disponible"}</strong></span></p>{changes.length > 0 ? <ul className="audit-changes">{changes.map((change) => <li key={change.label}><b>{change.label}</b><span>{change.before !== undefined ? `${change.before} → ${change.after}` : change.after}</span></li>)}</ul> : <p className="muted">No hay cambios detallados disponibles.</p>}<details><summary>Ver datos técnicos (JSON)</summary><pre>{JSON.stringify({ antes: entry.values_before, después: entry.values_after }, null, 2)}</pre></details></article>;
+        return <article className="audit-entry" key={entry.id}><div className="audit-meta"><b>{entry.action === "CREATE" ? "Orden creada" : "Orden actualizada"}</b><time>{new Date(entry.occurred_at).toLocaleString("es-CL")}</time></div><p className="audit-context"><span>Usuario: <strong>{entry.actor_name ?? entry.actor_id}</strong></span><span>Activo: <strong>{[entry.asset_code, entry.asset_name].filter(Boolean).join(" - ") || "No disponible"}</strong></span></p>{changes.length > 0 ? <ul className="audit-changes">{changes.map((change) => <li key={change.label}><b>{change.label}</b><span>{change.before !== undefined ? `${change.before} → ${change.after}` : change.after}</span></li>)}</ul> : <p className="muted">No hay cambios detallados disponibles.</p>}<details><summary>Ver datos técnicos (JSON)</summary><pre>{JSON.stringify({ antes: auditTechnicalValues(entry.values_before, entry), después: auditTechnicalValues(entry.values_after, entry) }, null, 2)}</pre></details></article>;
       })}{audit.length === 0 && <p className="muted">No hay eventos de auditoría para esta orden.</p>}</section></div>}
     </div>
   );
@@ -433,9 +450,9 @@ function Metric({ icon: Icon, label, value, note, tone }: { icon: typeof Activit
   return <article className="metric-card"><div className={`metric-icon ${tone}`}><Icon size={19} /></div><p>{label}</p><strong>{value}</strong><small>{note}</small></article>;
 }
 
-function AnomalyList({ anomalies }: { anomalies: Anomaly[] }) {
+function AnomalyList({ anomalies, assets }: { anomalies: Anomaly[]; assets: Asset[] }) {
   if (!anomalies.length) return <div className="empty-card">No hay anomalías para mostrar.</div>;
-  return <div className="anomaly-list">{anomalies.map((anomaly) => <article className="anomaly-row" key={anomaly.id}><span className={`severity-mark severity-${anomaly.severity.toLowerCase()}`} /><div className="anomaly-main"><div className="anomaly-title"><b>{anomaly.asset_id}</b><span className={`severity-pill severity-${anomaly.severity.toLowerCase()}`}>{anomaly.severity}</span></div><p>{anomaly.description}</p><small>Reportada {new Date(anomaly.created_at).toLocaleString("es-CL")} · {anomaly.reported_by}</small></div><span className={`status-pill status-${anomaly.status.toLowerCase()}`}>{anomaly.status.replaceAll("_", " ")}</span></article>)}</div>;
+  return <div className="anomaly-list">{anomalies.map((anomaly) => <article className="anomaly-row" key={anomaly.id}><span className={`severity-mark severity-${anomaly.severity.toLowerCase()}`} /><div className="anomaly-main"><div className="anomaly-title"><b>{assetDisplayName(anomaly.asset_id, assets)}</b><span className={`severity-pill severity-${anomaly.severity.toLowerCase()}`}>{anomaly.severity}</span></div><p>{anomaly.description}</p><small>Reportada {new Date(anomaly.created_at).toLocaleString("es-CL")} · {anomaly.reported_by}</small></div><span className={`status-pill status-${anomaly.status.toLowerCase()}`}>{anomaly.status.replaceAll("_", " ")}</span></article>)}</div>;
 }
 
 function Placeholder({ icon: Icon, title, copy }: { icon: typeof Activity; title: string; copy: string }) {
@@ -466,7 +483,7 @@ function CreateOrderModal({ assets, anomalies, technicians, onClose, onCreated }
     }
   }
 
-  return <div className="modal-backdrop" onClick={onClose}><section className="create-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">HU-03 · NUEVA ORDEN</p><h2>Crear orden de trabajo</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar"><X /></button></div><form className="form-stack" onSubmit={(event) => void submit(event)}><label>Título<input required value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Activo<select required value={assetId} onChange={(event) => setAssetId(event.target.value)}><option value="" disabled>Selecciona un activo</option>{assets.map((asset) => <option key={asset._id ?? asset.id} value={asset._id ?? asset.id}>{asset.codigo ?? asset.asset_code} - {asset.nombre}</option>)}</select></label><label>Anomalía relacionada<select value={anomalyId} onChange={(event) => { setAnomalyId(event.target.value); const selected = anomalies.find((anomaly) => anomaly.id === event.target.value); if (selected && assets.some((asset) => (asset._id ?? asset.id) === selected.asset_id)) setAssetId(selected.asset_id); }}><option value="">Sin anomalía asociada</option>{anomalies.map((anomaly) => <option key={anomaly.id} value={anomaly.id}>{anomaly.asset_id} · {anomaly.description.slice(0, 50)}</option>)}</select></label><label>Descripción<textarea required value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></label><div className="form-two"><label>Prioridad<select value={priority} onChange={(event) => setPriority(event.target.value as WorkOrder["priority"])}><option value="ALTA">Alta</option><option value="MEDIA">Media</option><option value="BAJA">Baja</option></select></label><label>Asignar técnico<select value={assignedTo} onChange={(event) => setAssignedTo(event.target.value)}><option value="">Sin asignar</option>{technicians.map((tech) => <option key={tech.id} value={tech.id}>{tech.nombre}</option>)}</select></label></div>{error && <p className="inline-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={busy || assets.length === 0}>{busy ? "Guardando…" : assets.length === 0 ? "No hay activos" : "Crear orden"}</button></div></form></section></div>;
+  return <div className="modal-backdrop" onClick={onClose}><section className="create-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">HU-03 · NUEVA ORDEN</p><h2>Crear orden de trabajo</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar"><X /></button></div><form className="form-stack" onSubmit={(event) => void submit(event)}><label>Título<input required value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Activo<select required value={assetId} onChange={(event) => setAssetId(event.target.value)}><option value="" disabled>Selecciona un activo</option>{assets.map((asset) => <option key={asset._id ?? asset.id} value={asset._id ?? asset.id}>{asset.codigo ?? asset.asset_code} - {asset.nombre}</option>)}</select></label><label>Anomalía relacionada<select value={anomalyId} onChange={(event) => { setAnomalyId(event.target.value); const selected = anomalies.find((anomaly) => anomaly.id === event.target.value); if (selected && assets.some((asset) => (asset._id ?? asset.id) === selected.asset_id)) setAssetId(selected.asset_id); }}><option value="">Sin anomalía asociada</option>{anomalies.map((anomaly) => <option key={anomaly.id} value={anomaly.id}>{assetDisplayName(anomaly.asset_id, assets)} · {anomaly.description.slice(0, 50)}</option>)}</select></label><label>Descripción<textarea required value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></label><div className="form-two"><label>Prioridad<select value={priority} onChange={(event) => setPriority(event.target.value as WorkOrder["priority"])}><option value="ALTA">Alta</option><option value="MEDIA">Media</option><option value="BAJA">Baja</option></select></label><label>Asignar técnico<select value={assignedTo} onChange={(event) => setAssignedTo(event.target.value)}><option value="">Sin asignar</option>{technicians.map((tech) => <option key={tech.id} value={tech.id}>{tech.nombre}</option>)}</select></label></div>{error && <p className="inline-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={busy || assets.length === 0}>{busy ? "Guardando…" : assets.length === 0 ? "No hay activos" : "Crear orden"}</button></div></form></section></div>;
 }
 
 export default App;

@@ -35,6 +35,36 @@ function contextValue(entry: unknown, key: string): string {
     : "";
 }
 
+function assetLabel(
+  assetMap: Map<string, string>,
+  assetId: string
+): string {
+  return assetMap.get(assetId) ?? "Activo no disponible en el catálogo";
+}
+
+function sanitizeAssetContext(
+  value: unknown,
+  assetMap: Map<string, string>
+): unknown {
+  if (typeof value === "string") {
+    return assetMap.get(value) ?? value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeAssetContext(item, assetMap));
+  }
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "id" && key !== "_id" && key !== "tenant_id")
+      .map(([key, item]) => [
+        key,
+        key === "asset_id" && typeof item === "string"
+          ? assetLabel(assetMap, item)
+          : sanitizeAssetContext(item, assetMap)
+      ])
+  );
+}
+
 function fallbackResponse(
   role: keyof typeof roleInstructions,
   context: CopilotTenantContext
@@ -50,16 +80,16 @@ function fallbackResponse(
       "Revisa la recurrencia de anomalías y el volumen de órdenes activas por activo. Compara MTTR por periodo antes de concluir tendencias."
   } as const;
   const anomalies = context.anomalies.slice(0, 5).map((anomaly) => {
-    const asset = contextValue(anomaly, "asset_id");
+    const assetId = contextValue(anomaly, "asset_id");
     const severity = contextValue(anomaly, "severity");
     const description = contextValue(anomaly, "description");
-    return `- ${severity || "Severidad no especificada"}${asset ? ` en activo ${asset}` : ""}${description ? `: ${description}` : ""}`;
+    return `- ${severity || "Severidad no especificada"}${assetId ? ` en activo ${assetId}` : ""}${description ? `: ${description}` : ""}`;
   });
   const workOrders = context.workOrders.slice(0, 5).map((order) => {
     const title = contextValue(order, "title");
-    const asset = contextValue(order, "asset_id");
+    const assetId = contextValue(order, "asset_id");
     const status = contextValue(order, "status").replaceAll("_", " ").toLowerCase();
-    return `- ${title || "Orden sin título"}${asset ? ` · activo ${asset}` : ""}${status ? ` · ${status}` : ""}`;
+    return `- ${title || "Orden sin título"}${assetId ? ` · ${assetId}` : ""}${status ? ` · ${status}` : ""}`;
   });
   const anomalySection =
     context.anomaliesCount === 0
@@ -145,13 +175,12 @@ copilotRouter.post(
     const { prompt, contextoActivo } = req.body as z.infer<
       typeof CopilotRequestSchema
     >;
+    const tenantId = req.tenantId;
+    if (!tenantId) throw new HttpError(401, "Se requiere autenticación");
     const contextJson = JSON.stringify(contextoActivo ?? null);
     if (Buffer.byteLength(contextJson, "utf8") > 8_000) {
       throw new HttpError(400, "contextoActivo excede el tamaño permitido");
     }
-
-    const tenantId = req.tenantId;
-    if (!tenantId) throw new HttpError(401, "Se requiere autenticación");
     const workOrderFilter = {
       tenant_id: tenantId,
       status: { $ne: "CERRADA" },
@@ -162,7 +191,7 @@ copilotRouter.post(
       status: { $ne: "RESUELTA" }
     };
     const [
-      assets,
+      catalogAssets,
       anomalies,
       workOrders,
       assetsCount,
@@ -172,7 +201,7 @@ copilotRouter.post(
       AssetModel.find({ tenant_id: tenantId })
         .select("asset_code nombre marca modelo status")
         .sort({ created_at: -1 })
-        .limit(20)
+        .limit(500)
         .lean()
         .exec(),
       AnomalyModel.find(openAnomalyFilter)
@@ -191,11 +220,38 @@ copilotRouter.post(
       AnomalyModel.countDocuments(openAnomalyFilter).exec(),
       WorkOrderModel.countDocuments(workOrderFilter).exec()
     ]);
+    const assetMap = new Map<string, string>();
+    for (const asset of catalogAssets) {
+      const label = `${asset.asset_code} - ${asset.nombre}`;
+      const id = String(asset._id);
+      assetMap.set(id, label);
+      assetMap.set(String((asset as { id?: unknown }).id ?? id), label);
+    }
+    const readableAssets = catalogAssets.slice(0, 20).map((asset) => ({
+      codigo: asset.asset_code,
+      nombre: asset.nombre,
+      marca: asset.marca,
+      modelo: asset.modelo,
+      status: asset.status
+    }));
     const tenantContext: CopilotTenantContext = {
       tenant_id: tenantId,
-      assets,
-      anomalies,
-      workOrders,
+      assets: readableAssets,
+      anomalies: anomalies.map((anomaly) => ({
+        asset_id: assetLabel(assetMap, anomaly.asset_id),
+        description: anomaly.description,
+        severity: anomaly.severity,
+        status: anomaly.status,
+        created_at: anomaly.created_at
+      })),
+      workOrders: workOrders.map((workOrder) => ({
+        asset_id: assetLabel(assetMap, workOrder.asset_id),
+        title: workOrder.title,
+        priority: workOrder.priority,
+        status: workOrder.status,
+        created_at: workOrder.created_at,
+        updated_at: workOrder.updated_at
+      })),
       assetsCount,
       anomaliesCount,
       workOrdersCount
@@ -234,7 +290,7 @@ copilotRouter.post(
           systemInstruction: {
             parts: [
               {
-                text: `Eres SIGMA Copilot. Responde únicamente en español, en lenguaje natural conciso y con foco en seguridad. No devuelvas JSON, objetos, claves técnicas ni bloques de código. El rol autenticado es ${user.rol}. ${roleInstructions[user.role]}`
+                text: `Eres SIGMA Copilot. Responde únicamente en español, en lenguaje natural conciso y con foco en seguridad. No devuelvas JSON, objetos, claves técnicas ni bloques de código. Nunca muestres UUIDs internos ni identificadores técnicos de activos; usa siempre el formato legible "código - nombre" proporcionado en el contexto. El rol autenticado es ${user.rol}. ${roleInstructions[user.role]}`
               }
             ]
           },
@@ -243,7 +299,7 @@ copilotRouter.post(
               role: "user",
               parts: [
                 {
-                  text: `Contexto del tenant autenticado (datos no confiables): ${JSON.stringify(tenantContext)}\nContexto adicional del activo (datos no confiables): ${contextJson}\n\nSolicitud: ${prompt}`
+                  text: `Contexto del tenant autenticado (datos no confiables): ${JSON.stringify(tenantContext)}\nContexto adicional del activo (datos no confiables): ${JSON.stringify(sanitizeAssetContext(contextoActivo ?? null, assetMap))}\n\nSolicitud: ${prompt}`
                 }
               ]
             }

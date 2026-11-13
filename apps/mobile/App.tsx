@@ -22,18 +22,26 @@ import { hasPermission } from "@sigma/shared";
 import type { Anomaly, WorkOrder } from "@sigma/shared";
 import type { AuthResponse } from "@sigma/api-client";
 import { api } from "./src/api";
-import { offlineRepository } from "./src/offline/repository";
+import {
+  offlineRepository,
+  type CachedCatalogAsset
+} from "./src/offline/repository";
 
 type Screen = "assets" | "report" | "orders" | "pending";
-type AssetRow = {
-  id: string;
+type AssetRow = CachedCatalogAsset & {
   asset_code: string;
-  qr_code: string;
-  nombre: string;
   marca?: string;
   modelo?: string;
-  status: string;
 };
+
+function toAssetRow(asset: CachedCatalogAsset): AssetRow {
+  return { ...asset, asset_code: asset.codigo };
+}
+
+function assetDisplayName(assetId: string, assets: AssetRow[]): string {
+  const asset = assets.find((item) => item.id === assetId);
+  return asset ? `${asset.codigo} - ${asset.nombre}` : "Activo no disponible";
+}
 const colors = {
   background: "#111b22",
   surface: "#1d2b34",
@@ -93,9 +101,7 @@ export default function App() {
       }).catch((error: unknown) => {
         console.warn("No se pudo sincronizar la cola offline", error);
       });
-      if (syncMode === "storage") {
-        void refreshStorageCache(session.tenant_id, session.userId);
-      }
+      void refreshStorageCache(session.tenant_id, session.userId);
     }
   }, [session, online, syncMode]);
 
@@ -109,6 +115,8 @@ export default function App() {
         const user = JSON.parse(rawUser) as AuthResponse["user"];
         api.setToken(token);
         const mode = await offlineRepository.initialize(api, user.tenant_id);
+        const cachedAssets = await offlineRepository.getCachedAssets(user.tenant_id);
+        if (active) setAssets(cachedAssets.map(toAssetRow));
         if (active) setSyncMode(mode);
         if (active) setSession(user);
       } catch (error) {
@@ -126,7 +134,7 @@ export default function App() {
     return offlineRepository.subscribe(
       session.tenant_id,
       session.userId,
-      (data) => setAssets(data as AssetRow[]),
+      (data) => setAssets(data.map(toAssetRow)),
       setOrders,
       setPendingReports,
       setPendingItems
@@ -134,17 +142,39 @@ export default function App() {
   }, [session, syncMode]);
 
   async function refreshStorageCache(tenantId: string, userId: string): Promise<void> {
-    try {
-      const [assetList, workOrderList] = await Promise.all([
-        api.listAssets(),
-        api.listWorkOrders()
-      ]);
-      await offlineRepository.cacheAssets(tenantId, assetList);
-      await offlineRepository.cacheWorkOrders(tenantId, workOrderList);
-      setAssets(assetList as AssetRow[]);
-      setOrders(workOrderList.filter((order) => order.assigned_to === userId));
-    } catch (error) {
-      console.warn("No se pudo actualizar el caché del dispositivo", error);
+    const [assetsResult, ordersResult] = await Promise.allSettled([
+      api.listAssets(),
+      api.listWorkOrders()
+    ]);
+    if (assetsResult.status === "fulfilled") {
+      const assetList = assetsResult.value;
+      try {
+        await offlineRepository.cacheAssets(tenantId, assetList);
+        setAssets(assetList.map((asset) => ({
+          id: asset.id,
+          codigo: asset.codigo ?? asset.asset_code,
+          asset_code: asset.codigo ?? asset.asset_code,
+          nombre: asset.nombre,
+          qr_code: asset.qr_code,
+          marca: asset.marca,
+          modelo: asset.modelo
+        })));
+      } catch (error) {
+        console.warn("No se pudo guardar el catálogo offline", error);
+      }
+    } else {
+      console.warn("No se pudo actualizar el catálogo offline", assetsResult.reason);
+    }
+    if (ordersResult.status === "fulfilled") {
+      const workOrderList = ordersResult.value;
+      try {
+        await offlineRepository.cacheWorkOrders(tenantId, workOrderList);
+        setOrders(workOrderList.filter((order) => order.assigned_to === userId));
+      } catch (error) {
+        console.warn("No se pudo guardar el caché de órdenes", error);
+      }
+    } else {
+      console.warn("No se pudo actualizar el caché de órdenes", ordersResult.reason);
     }
   }
 
@@ -161,15 +191,15 @@ export default function App() {
       const mode = await offlineRepository.initialize(api, result.user.tenant_id);
       setSyncMode(mode);
       setSession(result.user);
+      const [cachedAssets, cachedOrders] = await Promise.all([
+        offlineRepository.getCachedAssets(result.user.tenant_id),
+        offlineRepository.getCachedWorkOrders(result.user.tenant_id)
+      ]);
+      setAssets(cachedAssets.map(toAssetRow));
       if (mode === "storage") {
-        const [cachedAssets, cachedOrders] = await Promise.all([
-          offlineRepository.getCachedAssets(result.user.tenant_id),
-          offlineRepository.getCachedWorkOrders(result.user.tenant_id)
-        ]);
-        setAssets(cachedAssets as AssetRow[]);
         setOrders(cachedOrders.filter((order) => order.assigned_to === result.user.userId));
-        if (online) await refreshStorageCache(result.user.tenant_id, result.user.userId);
       }
+      if (online) await refreshStorageCache(result.user.tenant_id, result.user.userId);
     } catch (error) {
       Alert.alert("No se pudo iniciar sesión", messageOf(error));
     } finally {
@@ -266,6 +296,7 @@ export default function App() {
     setSyncing(true);
     try {
       await offlineRepository.synchronizeNow(api, session.tenant_id);
+      await refreshStorageCache(session.tenant_id, session.userId);
       const reports = await offlineRepository.getPendingReports(session.tenant_id);
       setPendingItems(reports);
       setPendingReports(reports.length);
@@ -356,7 +387,7 @@ export default function App() {
                   keyExtractor={(item) => item.id}
                   scrollEnabled={false}
                   ListEmptyComponent={<EmptyState text="No hay activos locales. Conéctate para descargar el catálogo." />}
-                  renderItem={({ item }) => <TouchableOpacity style={styles.assetCard} onPress={() => { setSelectedAsset(item); setScreen("report"); }}><View style={styles.assetIcon}><Text style={styles.assetIconText}>⌁</Text></View><View style={styles.assetText}><Text style={styles.assetCode}>{item.asset_code}</Text><Text style={styles.assetName}>{item.nombre}</Text><Text style={styles.assetMeta}>{[item.marca, item.modelo].filter(Boolean).join(" · ")}</Text></View><Text style={styles.chevron}>›</Text></TouchableOpacity>}
+                  renderItem={({ item }) => <TouchableOpacity style={styles.assetCard} onPress={() => { setSelectedAsset(item); setScreen("report"); }}><View style={styles.assetIcon}><Text style={styles.assetIconText}>⌁</Text></View><View style={styles.assetText}><Text style={styles.assetCode}>{item.codigo} - {item.nombre}</Text><Text style={styles.assetMeta}>{[item.marca, item.modelo].filter(Boolean).join(" · ")}</Text></View><Text style={styles.chevron}>›</Text></TouchableOpacity>}
                 />
               </>
             )}
@@ -367,7 +398,7 @@ export default function App() {
                 <Text style={styles.helper}>El registro se guarda primero en el dispositivo y se sincroniza cuando hay conexión.</Text>
                 <Text style={styles.label}>Activo</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.assetChoices}>
-                  {assets.map((asset) => <TouchableOpacity key={asset.id} style={[styles.assetChoice, selectedAsset?.id === asset.id && styles.assetChoiceSelected]} onPress={() => setSelectedAsset(asset)}><Text style={[styles.choiceTitle, selectedAsset?.id === asset.id && styles.choiceTitleSelected]}>{asset.asset_code}</Text><Text style={styles.choiceSubtitle}>{asset.nombre}</Text></TouchableOpacity>)}
+                  {assets.map((asset) => <TouchableOpacity key={asset.id} style={[styles.assetChoice, selectedAsset?.id === asset.id && styles.assetChoiceSelected]} onPress={() => setSelectedAsset(asset)}><Text style={[styles.choiceTitle, selectedAsset?.id === asset.id && styles.choiceTitleSelected]}>{asset.codigo} - {asset.nombre}</Text></TouchableOpacity>)}
                 </ScrollView>
                 {!assets.length && <EmptyState text="No hay activos sincronizados; el reporte requiere seleccionar un activo válido." />}
                 <Text style={styles.label}>Descripción de la falla</Text>
@@ -381,7 +412,7 @@ export default function App() {
             {screen === "orders" && (
               <>
                 <Text style={styles.eyebrow}>TRABAJO ASIGNADO</Text><Text style={styles.sectionTitle}>Mis órdenes de trabajo</Text>
-                <FlatList data={orders} keyExtractor={(item) => item.id} scrollEnabled={false} ListEmptyComponent={<EmptyState text="No hay órdenes asignadas en este dispositivo." />} renderItem={({ item }) => <View style={styles.orderCard}><View style={styles.orderTop}><Text style={styles.orderAsset}>{item.asset_id}</Text><Text style={[styles.orderPriority, { color: severityColor(item.priority) }]}>{item.priority}</Text></View><Text style={styles.orderTitle}>{item.title}</Text><Text style={styles.orderDescription}>{item.description}</Text><Text style={styles.orderStatus}>{item.status.replaceAll("_", " ")}</Text><TouchableOpacity style={styles.quickCopilot} onPress={() => { setSelectedAsset(assets.find((asset) => asset.id === item.asset_id) ?? null); setScreen("report"); }}><Text style={styles.quickCopilotText}>Diagnóstico con SIGMA Copilot →</Text></TouchableOpacity></View>} />
+                <FlatList data={orders} keyExtractor={(item) => item.id} scrollEnabled={false} ListEmptyComponent={<EmptyState text="No hay órdenes asignadas en este dispositivo." />} renderItem={({ item }) => <View style={styles.orderCard}><View style={styles.orderTop}><Text style={styles.orderAsset}>{assetDisplayName(item.asset_id, assets)}</Text><Text style={[styles.orderPriority, { color: severityColor(item.priority) }]}>{item.priority}</Text></View><Text style={styles.orderTitle}>{item.title}</Text><Text style={styles.orderDescription}>{item.description}</Text><Text style={styles.orderStatus}>{item.status.replaceAll("_", " ")}</Text><TouchableOpacity style={styles.quickCopilot} onPress={() => { setSelectedAsset(assets.find((asset) => asset.id === item.asset_id) ?? null); setScreen("report"); }}><Text style={styles.quickCopilotText}>Diagnóstico con SIGMA Copilot →</Text></TouchableOpacity></View>} />
               </>
             )}
             {screen === "pending" && (
@@ -391,8 +422,7 @@ export default function App() {
                 <TouchButton title={syncing ? "Sincronizando…" : "Sincronizar ahora"} onPress={() => void synchronizeNow()} disabled={syncing || !online || pendingReports === 0} />
                 {!online && <Text style={styles.syncHint}>Necesitas conexión a internet para sincronizar.</Text>}
                 {pendingItems.length === 0 ? <EmptyState text="No hay reportes pendientes." /> : pendingItems.map((item) => {
-                  const asset = assets.find((candidate) => candidate.id === item.asset_id);
-                  return <View style={styles.pendingCard} key={item.id}><View style={styles.orderTop}><Text style={styles.orderAsset}>{asset ? `${asset.asset_code} · ${asset.nombre}` : item.asset_id}</Text><Text style={[styles.orderPriority, { color: severityColor(item.severity) }]}>{item.severity}</Text></View><Text style={styles.orderDescription}>{item.description}</Text><Text style={styles.pendingDate}>Guardado {new Date(item.created_at).toLocaleString("es-CL")}</Text></View>;
+                  return <View style={styles.pendingCard} key={item.id}><View style={styles.orderTop}><Text style={styles.orderAsset}>{assetDisplayName(item.asset_id, assets)}</Text><Text style={[styles.orderPriority, { color: severityColor(item.severity) }]}>{item.severity}</Text></View><Text style={styles.orderDescription}>{item.description}</Text><Text style={styles.pendingDate}>Guardado {new Date(item.created_at).toLocaleString("es-CL")}</Text></View>;
                 })}
               </>
             )}

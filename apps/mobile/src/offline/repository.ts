@@ -9,6 +9,13 @@ import type {
 import { SigmaPowerSyncConnector } from "../powersync/connector";
 
 type OfflineMode = "powersync" | "storage";
+export interface CachedCatalogAsset {
+  id: string;
+  codigo: string;
+  nombre: string;
+  qr_code: string;
+}
+
 export interface PendingReport {
   id: string;
   asset_id: string;
@@ -100,11 +107,23 @@ export class OfflineRepository {
     return this.mode;
   }
 
-  async cacheAssets(tenantId: string, assets: Asset[]): Promise<void> {
-    await setValue(`${storagePrefix}${tenantId}.assets`, assets);
+  async cacheAssets(
+    tenantId: string,
+    assets: Array<Pick<Asset, "id" | "asset_code" | "nombre" | "qr_code"> & {
+      _id?: string;
+      codigo?: string;
+    }>
+  ): Promise<void> {
+    const catalog = assets.map((asset) => ({
+      id: asset.id || asset._id || "",
+      codigo: asset.codigo || asset.asset_code,
+      nombre: asset.nombre,
+      qr_code: asset.qr_code
+    }));
+    await setValue(`${storagePrefix}${tenantId}.assets`, catalog);
   }
 
-  async getCachedAssets(tenantId: string): Promise<Asset[]> {
+  async getCachedAssets(tenantId: string): Promise<CachedCatalogAsset[]> {
     return getValue(`${storagePrefix}${tenantId}.assets`, []);
   }
 
@@ -209,7 +228,7 @@ export class OfflineRepository {
   subscribe(
     tenantId: string,
     userId: string,
-    onAssets: (assets: Asset[]) => void,
+    onAssets: (assets: CachedCatalogAsset[]) => void,
     onOrders: (orders: WorkOrder[]) => void,
     onPendingCount: (count: number) => void,
     onPendingReports: (reports: PendingReport[]) => void
@@ -237,10 +256,28 @@ export class OfflineRepository {
     };
 
     if (this.usesPowerSync && this.database) {
-      watch<Asset>(
+      watch<{
+        id: string;
+        asset_code: string;
+        qr_code: string;
+        nombre: string;
+      }>(
         "SELECT id, tenant_id, asset_code, qr_code, nombre, marca, modelo, serial_number, status, created_at FROM activos WHERE tenant_id = ? ORDER BY asset_code",
         [tenantId],
-        onAssets
+        (rows) => {
+          if (rows.length === 0) return;
+          const catalog = rows.map((asset) => ({
+            id: asset.id,
+            codigo: asset.asset_code,
+            asset_code: asset.asset_code,
+            nombre: asset.nombre,
+            qr_code: asset.qr_code
+          }));
+          onAssets(catalog);
+          void this.cacheAssets(tenantId, catalog).catch((error: unknown) =>
+            console.error("No se pudo guardar el catálogo offline", error)
+          );
+        }
       );
       watch<WorkOrder>(
         "SELECT id, tenant_id, anomaly_id, asset_id, title, description, priority, status, assigned_to, created_by, created_at, updated_at FROM ordenes_trabajo WHERE tenant_id = ? AND assigned_to = ? AND status != 'CERRADA' ORDER BY created_at DESC",

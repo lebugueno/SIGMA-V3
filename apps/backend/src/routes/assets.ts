@@ -12,8 +12,10 @@ assetsRouter.get("/", requirePermission("assets", "read"), async (req, res) => {
   res.json({
     assets: assets.map((asset) => ({
       id: asset._id.toString(),
+      _id: asset._id.toString(),
       tenant_id: asset.tenant_id,
       asset_code: asset.asset_code,
+      codigo: asset.asset_code,
       qr_code: asset.qr_code,
       nombre: asset.nombre,
       ...(asset.marca ? { marca: asset.marca } : {}),

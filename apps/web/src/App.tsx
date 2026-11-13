@@ -14,7 +14,7 @@ import {
   Wrench,
   X
 } from "lucide-react";
-import { hasPermission, type Anomaly, type UserRole, type WorkOrder } from "@sigma/shared";
+import { hasPermission, type Anomaly, type Asset, type UserRole, type WorkOrder } from "@sigma/shared";
 import {
   ApiError,
   SigmaApiClient,
@@ -108,6 +108,7 @@ function App() {
   const [user, setUser] = useState<AuthResponse["user"] | null>(readStoredUser);
   const [view, setView] = useState<View>("overview");
   const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
+  const [assets, setAssets] = useState<Asset[]>([]);
   const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
   const [technicians, setTechnicians] = useState<Array<{ id: string; nombre: string; email: string }>>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
@@ -143,7 +144,14 @@ function App() {
       if (hasPermission(user.role, "workOrders", "read")) {
         setWorkOrders(await api.listWorkOrders());
       }
-      if (user.role === "SUPERVISOR") setTechnicians(await api.listTechnicians());
+      if (user.role === "SUPERVISOR") {
+        const [tenantAssets, tenantTechnicians] = await Promise.all([
+          api.listAssets(),
+          api.listTechnicians()
+        ]);
+        setAssets(tenantAssets);
+        setTechnicians(tenantTechnicians);
+      }
     } catch (requestError) {
       setError(messageOf(requestError));
     } finally {
@@ -277,7 +285,7 @@ function App() {
 
       {copilotOpen && <aside className="copilot-panel"><div className="copilot-header"><div className="copilot-title"><span className="copilot-icon"><Bot size={20} /></span><span><b>SIGMA Copilot</b><small>Asistente para {roleNames[user.role]}</small></span></div><button className="icon-button" aria-label="Cerrar Copilot" onClick={() => setCopilotOpen(false)}><X size={19} /></button></div><div className="copilot-context"><span className="status-dot" />Contexto adaptado al rol autenticado</div><div className="copilot-messages"><div className="assistant-bubble"><MessageSquareText size={17} /><p>Hola, {user.nombre.split(" ")[0]}. ¿En qué puedo ayudarte con tus operaciones hoy?</p></div>{copilotResponse && <div className="assistant-bubble response-bubble"><p>{copilotResponse}</p></div>}</div><form className="copilot-compose" onSubmit={(event) => void sendCopilot(event)}><textarea value={copilotPrompt} onChange={(event) => setCopilotPrompt(event.target.value)} placeholder="Pregunta sobre tus operaciones…" rows={3} /><button className="primary-button" aria-label="Enviar mensaje"><Send size={17} /></button></form><p className="copilot-disclaimer">La IA puede cometer errores. Verifica recomendaciones críticas.</p></aside>}
 
-      {createOpen && <CreateOrderModal anomalies={anomalies} technicians={technicians} onClose={() => setCreateOpen(false)} onCreated={async () => { setCreateOpen(false); await refresh(); }} />}
+      {createOpen && <CreateOrderModal assets={assets} anomalies={anomalies} technicians={technicians} onClose={() => setCreateOpen(false)} onCreated={async () => { setCreateOpen(false); await refresh(); }} />}
       {auditFor && <div className="modal-backdrop" onClick={() => setAuditFor(null)}><section className="audit-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">REGISTRO APPEND-ONLY</p><h2>Historial de auditoría</h2></div><button className="icon-button" onClick={() => setAuditFor(null)} aria-label="Cerrar"><X /></button></div>{audit.map((entry) => <article className="audit-entry" key={entry.id}><div className="audit-meta"><b>{entry.action === "CREATE" ? "Orden creada" : "Orden actualizada"}</b><time>{new Date(entry.occurred_at).toLocaleString("es-CL")}</time></div><p>Usuario: {entry.actor_id}</p><details><summary>Valores antes y después</summary><pre>{JSON.stringify({ antes: entry.values_before, después: entry.values_after }, null, 2)}</pre></details></article>)}{audit.length === 0 && <p className="muted">No hay eventos de auditoría para esta orden.</p>}</section></div>}
     </div>
   );
@@ -296,7 +304,7 @@ function Placeholder({ icon: Icon, title, copy }: { icon: typeof Activity; title
   return <section className="placeholder-page"><div className="placeholder-icon"><Icon size={25} /></div><p className="eyebrow">VISTA PREPARADA</p><h2>{title}</h2><p>{copy}</p><span className="coming-chip">Próxima etapa de integración</span></section>;
 }
 
-function CreateOrderModal({ anomalies, technicians, onClose, onCreated }: { anomalies: Anomaly[]; technicians: Array<{ id: string; nombre: string; email: string }>; onClose: () => void; onCreated: () => Promise<void> }) {
+function CreateOrderModal({ assets, anomalies, technicians, onClose, onCreated }: { assets: Asset[]; anomalies: Anomaly[]; technicians: Array<{ id: string; nombre: string; email: string }>; onClose: () => void; onCreated: () => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [assetId, setAssetId] = useState("");
@@ -320,7 +328,7 @@ function CreateOrderModal({ anomalies, technicians, onClose, onCreated }: { anom
     }
   }
 
-  return <div className="modal-backdrop" onClick={onClose}><section className="create-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">HU-03 · NUEVA ORDEN</p><h2>Crear orden de trabajo</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar"><X /></button></div><form className="form-stack" onSubmit={(event) => void submit(event)}><label>Título<input required value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Activo ID<input required value={assetId} onChange={(event) => setAssetId(event.target.value)} placeholder="Identificador del activo" /></label><label>Anomalía relacionada<select value={anomalyId} onChange={(event) => { setAnomalyId(event.target.value); const selected = anomalies.find((anomaly) => anomaly.id === event.target.value); if (selected) setAssetId(selected.asset_id); }}><option value="">Sin anomalía asociada</option>{anomalies.map((anomaly) => <option key={anomaly.id} value={anomaly.id}>{anomaly.asset_id} · {anomaly.description.slice(0, 50)}</option>)}</select></label><label>Descripción<textarea required value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></label><div className="form-two"><label>Prioridad<select value={priority} onChange={(event) => setPriority(event.target.value as WorkOrder["priority"])}><option value="ALTA">Alta</option><option value="MEDIA">Media</option><option value="BAJA">Baja</option></select></label><label>Asignar técnico<select value={assignedTo} onChange={(event) => setAssignedTo(event.target.value)}><option value="">Sin asignar</option>{technicians.map((tech) => <option key={tech.id} value={tech.id}>{tech.nombre}</option>)}</select></label></div>{error && <p className="inline-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={busy}>{busy ? "Guardando…" : "Crear orden"}</button></div></form></section></div>;
+  return <div className="modal-backdrop" onClick={onClose}><section className="create-modal" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">HU-03 · NUEVA ORDEN</p><h2>Crear orden de trabajo</h2></div><button className="icon-button" onClick={onClose} aria-label="Cerrar"><X /></button></div><form className="form-stack" onSubmit={(event) => void submit(event)}><label>Título<input required value={title} onChange={(event) => setTitle(event.target.value)} /></label><label>Activo<select required value={assetId} onChange={(event) => setAssetId(event.target.value)}><option value="" disabled>Selecciona un activo</option>{assets.map((asset) => <option key={asset._id ?? asset.id} value={asset._id ?? asset.id}>{asset.codigo ?? asset.asset_code} - {asset.nombre}</option>)}</select></label><label>Anomalía relacionada<select value={anomalyId} onChange={(event) => { setAnomalyId(event.target.value); const selected = anomalies.find((anomaly) => anomaly.id === event.target.value); if (selected && assets.some((asset) => (asset._id ?? asset.id) === selected.asset_id)) setAssetId(selected.asset_id); }}><option value="">Sin anomalía asociada</option>{anomalies.map((anomaly) => <option key={anomaly.id} value={anomaly.id}>{anomaly.asset_id} · {anomaly.description.slice(0, 50)}</option>)}</select></label><label>Descripción<textarea required value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></label><div className="form-two"><label>Prioridad<select value={priority} onChange={(event) => setPriority(event.target.value as WorkOrder["priority"])}><option value="ALTA">Alta</option><option value="MEDIA">Media</option><option value="BAJA">Baja</option></select></label><label>Asignar técnico<select value={assignedTo} onChange={(event) => setAssignedTo(event.target.value)}><option value="">Sin asignar</option>{technicians.map((tech) => <option key={tech.id} value={tech.id}>{tech.nombre}</option>)}</select></label></div>{error && <p className="inline-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={busy || assets.length === 0}>{busy ? "Guardando…" : assets.length === 0 ? "No hay activos" : "Crear orden"}</button></div></form></section></div>;
 }
 
 export default App;

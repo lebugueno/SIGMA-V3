@@ -7,7 +7,10 @@ import { requireAuth, requirePermission, requireRole } from "../middleware/auth.
 import { HttpError } from "../middleware/errors.js";
 import { validateBody } from "../middleware/validate.js";
 import { writeAuditEntry } from "../services/audit.js";
-import { assertWorkOrderReferences } from "../services/references.js";
+import {
+  assertWorkOrderReferences,
+  resolveAssetIdForTenant
+} from "../services/references.js";
 
 export const CreateWorkOrderSchema = WorkOrderSchema.omit({
   id: true,
@@ -158,9 +161,13 @@ workOrdersRouter.post(
 
     try {
       await session.withTransaction(async () => {
+        const canonicalAssetId = await resolveAssetIdForTenant(
+          body.asset_id,
+          tenantId
+        );
         await assertWorkOrderReferences(
           {
-            assetId: body.asset_id,
+            assetId: canonicalAssetId,
             anomalyId: body.anomaly_id,
             assignedTo: body.assigned_to
           },
@@ -170,6 +177,7 @@ workOrdersRouter.post(
           [
             {
               ...body,
+              asset_id: canonicalAssetId,
               tenant_id: tenantId,
               created_by: user.userId,
               status: body.assigned_to ? "ASIGNADA" : "PENDIENTE"

@@ -1,6 +1,30 @@
 import { AnomalyModel, AssetModel, UserModel } from "@sigma/db-sync";
 import { HttpError } from "../middleware/errors.js";
 
+export async function resolveAssetIdForTenant(
+  assetReference: string,
+  tenantId: string
+): Promise<string> {
+  const asset =
+    (await AssetModel.findOne({
+      _id: assetReference,
+      tenant_id: tenantId
+    }).exec()) ??
+    (await AssetModel.findOne({
+      asset_code: assetReference,
+      tenant_id: tenantId
+    }).exec()) ??
+    (await AssetModel.findOne({
+      qr_code: assetReference,
+      tenant_id: tenantId
+    }).exec());
+
+  if (!asset) {
+    throw new HttpError(404, "Activo no encontrado");
+  }
+  return asset._id.toString();
+}
+
 export async function assertAssetBelongsToTenant(
   assetId: string,
   tenantId: string

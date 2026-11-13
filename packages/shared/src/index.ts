@@ -44,8 +44,10 @@ export type User = z.infer<typeof UserSchema>;
 
 export const AssetSchema = z.object({
   id: idSchema,
+  _id: idSchema.optional(),
   tenant_id: tenantIdSchema,
   asset_code: z.string().trim().min(1),
+  codigo: z.string().trim().min(1).optional(),
   qr_code: z.string().trim().min(1),
   nombre: z.string().trim().min(1),
   marca: z.string().trim().min(1).optional(),

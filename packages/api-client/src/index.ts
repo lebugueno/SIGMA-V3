@@ -90,7 +90,7 @@ export class SigmaApiClient {
   constructor(options: SigmaApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.token = options.token ?? null;
-    this.fetcher = options.fetcher ?? fetch;
+    this.fetcher = options.fetcher ?? ((...args) => globalThis.fetch(...args));
   }
 
   setToken(token: string | null): void {

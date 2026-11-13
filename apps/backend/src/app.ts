@@ -54,6 +54,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/anomalias", anomaliesRouter);
 app.use("/api/activos", assetsRouter);
 app.use("/api/ordenes-trabajo", workOrdersRouter);
+app.use("/api/ots", workOrdersRouter);
 app.use("/api/powersync", powerSyncRouter);
 app.use("/api/ai/copilot", copilotRouter);
 app.use((_req, res) => {

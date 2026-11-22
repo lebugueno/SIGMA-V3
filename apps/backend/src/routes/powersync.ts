@@ -109,10 +109,10 @@ async function applyMutation(
     if (!hasPermission(role, "workOrders", mutation.op === "PUT" ? "create" : "update")) {
       throw new HttpError(403, "No tiene permisos para sincronizar esta orden");
     }
-    if (role !== "SUPERVISOR") {
-      throw new HttpError(403, "Solo Supervisor puede gestionar órdenes de trabajo");
-    }
     if (mutation.op === "PUT") {
+      if (role !== "SUPERVISOR") {
+        throw new HttpError(403, "Solo Supervisor puede crear órdenes de trabajo");
+      }
       const data = CreateWorkOrderSchema.parse(
         pickFields(mutation.data, [
           "anomaly_id",
@@ -159,6 +159,7 @@ async function applyMutation(
         pickFields(mutation.data, [
           "title",
           "description",
+          "closing_note",
           "priority",
           "status",
           "assigned_to"
@@ -171,6 +172,29 @@ async function applyMutation(
         .session(session)
         .exec();
       if (!workOrder) throw new HttpError(404, "Orden de trabajo no encontrada");
+      if (role === "TECNICO") {
+        const fields = Object.keys(patch);
+        if (
+          workOrder.assigned_to !== userId ||
+          fields.some((field) => !["status", "closing_note"].includes(field))
+        ) {
+          throw new HttpError(403, "Solo puede actualizar el estado de una orden asignada");
+        }
+        const validTransition =
+          (workOrder.status === "ASIGNADA" && patch.status === "EN_PROGRESO") ||
+          (workOrder.status === "EN_PROGRESO" && patch.status === "CERRADA");
+        if (!validTransition) {
+          throw new HttpError(400, "La transición de estado no es válida");
+        }
+        if (patch.closing_note !== undefined && patch.status !== "CERRADA") {
+          throw new HttpError(400, "La nota solo se puede guardar al completar la orden");
+        }
+        if (patch.status === "CERRADA" && !patch.closing_note?.trim()) {
+          throw new HttpError(400, "Agrega una nota breve para cerrar la orden");
+        }
+      } else if (role !== "SUPERVISOR") {
+        throw new HttpError(403, "No tiene permisos para actualizar órdenes de trabajo");
+      }
       if (patch.assigned_to !== undefined) {
         await assertWorkOrderReferences(
           {

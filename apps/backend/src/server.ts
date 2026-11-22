@@ -3,7 +3,7 @@ import { initializeMongoIndexes } from "@sigma/db-sync";
 import { app } from "./app.js";
 import { env } from "./config/env.js";
 
-const server = app.listen(env.PORT, () => {
+const server = app.listen(env.PORT, "0.0.0.0", () => {
   console.log(`SIGMA backend escuchando en el puerto ${env.PORT}`);
 });
 

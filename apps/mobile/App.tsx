@@ -24,10 +24,11 @@ import type { AuthResponse } from "@sigma/api-client";
 import { api } from "./src/api";
 import {
   offlineRepository,
-  type CachedCatalogAsset
+  type CachedCatalogAsset,
+  type PendingItem
 } from "./src/offline/repository";
 
-type Screen = "assets" | "report" | "orders" | "pending";
+type Screen = "assets" | "report" | "orders" | "order-detail" | "pending";
 type AssetRow = CachedCatalogAsset & {
   asset_code: string;
   marca?: string;
@@ -62,11 +63,11 @@ export default function App() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [assets, setAssets] = useState<AssetRow[]>([]);
-  const [pendingReports, setPendingReports] = useState(0);
-  const [pendingItems, setPendingItems] = useState<
-    Awaited<ReturnType<typeof offlineRepository.getPendingReports>>
-  >([]);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [pendingItems, setPendingItems] = useState<PendingItem[]>([]);
   const [orders, setOrders] = useState<WorkOrder[]>([]);
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  const [closingNote, setClosingNote] = useState("");
   const [selectedAsset, setSelectedAsset] = useState<AssetRow | null>(null);
   const [description, setDescription] = useState("");
   const [severity, setSeverity] = useState<Anomaly["severity"]>("MEDIA");
@@ -95,9 +96,9 @@ export default function App() {
     if (!session) return;
     if (online) {
       void offlineRepository.syncPending(api, session.tenant_id).then(async () => {
-        const reports = await offlineRepository.getPendingReports(session.tenant_id);
-        setPendingItems(reports);
-        setPendingReports(reports.length);
+        const items = await offlineRepository.getPendingItems(session.tenant_id);
+        setPendingItems(items);
+        setPendingCount(items.length);
       }).catch((error: unknown) => {
         console.warn("No se pudo sincronizar la cola offline", error);
       });
@@ -136,7 +137,7 @@ export default function App() {
       session.userId,
       (data) => setAssets(data.map(toAssetRow)),
       setOrders,
-      setPendingReports,
+      setPendingCount,
       setPendingItems
     );
   }, [session, syncMode]);
@@ -253,14 +254,14 @@ export default function App() {
       if (online && syncMode === "storage") {
         await offlineRepository.syncPending(api, session.tenant_id);
       }
-      const pendingCount = await offlineRepository.getPendingCount(session.tenant_id);
-      setPendingItems(await offlineRepository.getPendingReports(session.tenant_id));
-      setPendingReports(pendingCount);
+      const items = await offlineRepository.getPendingItems(session.tenant_id);
+      setPendingItems(items);
+      setPendingCount(items.length);
       setDescription("");
       setPhotoUri("");
       Alert.alert(
         "Reporte guardado",
-        pendingCount === 0
+        items.length === 0
           ? "El reporte se guardó y sincronizó correctamente."
           : online && syncMode === "powersync"
             ? "El reporte quedó guardado localmente y se enviará mediante PowerSync."
@@ -297,16 +298,16 @@ export default function App() {
     try {
       await offlineRepository.synchronizeNow(api, session.tenant_id);
       await refreshStorageCache(session.tenant_id, session.userId);
-      const reports = await offlineRepository.getPendingReports(session.tenant_id);
-      setPendingItems(reports);
-      setPendingReports(reports.length);
+      const items = await offlineRepository.getPendingItems(session.tenant_id);
+      setPendingItems(items);
+      setPendingCount(items.length);
       Alert.alert(
         syncMode === "powersync" ? "Sincronización solicitada" : "Sincronización finalizada",
         syncMode === "powersync"
           ? "PowerSync recibió la solicitud. La bandeja se actualizará conforme avance la sincronización."
-          : reports.length === 0
-            ? "Todos los reportes pendientes se sincronizaron."
-            : `Quedan ${reports.length} reporte${reports.length === 1 ? "" : "s"} pendiente${reports.length === 1 ? "" : "s"}. Puedes volver a intentarlo.`
+          : items.length === 0
+            ? "Todos los cambios pendientes se sincronizaron."
+            : `Quedan ${items.length} elemento${items.length === 1 ? "" : "s"} pendiente${items.length === 1 ? "" : "s"}. Puedes volver a intentarlo.`
       );
     } catch (error) {
       Alert.alert("No se pudo sincronizar", messageOf(error));
@@ -325,6 +326,59 @@ export default function App() {
       setScreen("report");
     } else {
       Alert.alert("Activo no encontrado", "El QR no coincide con los activos disponibles offline.");
+    }
+  }
+
+  async function advanceWorkOrder(order: WorkOrder) {
+    if (!session) return;
+    const status = order.status === "ASIGNADA" ? "EN_PROGRESO" : "CERRADA";
+    const note = closingNote.trim();
+    if (status === "CERRADA" && !note) {
+      Alert.alert("Nota requerida", "Agrega una nota breve para cerrar la orden.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = await offlineRepository.updateAssignedWorkOrder(
+        order,
+        session.tenant_id,
+        session.userId,
+        {
+          status,
+          ...(status === "CERRADA" ? { closing_note: note } : {})
+        }
+      );
+      setOrders((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item))
+      );
+      if (online && syncMode === "storage") {
+        await offlineRepository.syncPending(api, session.tenant_id);
+      }
+      const items = await offlineRepository.getPendingItems(session.tenant_id);
+      setPendingItems(items);
+      setPendingCount(items.length);
+      setClosingNote("");
+      if (
+        syncMode === "storage" &&
+        online &&
+        items.some((item) => item.kind === "work_order" && item.id === order.id)
+      ) {
+        Alert.alert(
+          "Actualización pendiente",
+          "El cambio quedó guardado en el dispositivo y se reintentará al recuperar la conexión."
+        );
+      } else {
+        Alert.alert(
+          "Orden actualizada",
+          status === "CERRADA"
+            ? "La orden quedó completada."
+            : "La orden quedó en progreso."
+        );
+      }
+    } catch (error) {
+      Alert.alert("No se pudo actualizar la orden", messageOf(error));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -373,15 +427,15 @@ export default function App() {
             <TabButton label="Activos / QR" active={screen === "assets"} onPress={() => setScreen("assets")} />
             <TabButton label="Reportar" active={screen === "report"} onPress={() => setScreen("report")} />
             <TabButton label="Mis OTs" active={screen === "orders"} onPress={() => setScreen("orders")} />
-            <TabButton label={`Pendientes (${pendingReports})`} active={screen === "pending"} onPress={() => setScreen("pending")} />
+            <TabButton label={`Pendientes (${pendingCount})`} active={screen === "pending"} onPress={() => setScreen("pending")} />
           </View>
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             {screen === "assets" && (
               <>
                 <View style={styles.sectionTitleRow}><View><Text style={styles.eyebrow}>CATÁLOGO DESCARGADO</Text><Text style={styles.sectionTitle}>Activos industriales</Text></View><Text style={styles.countBadge}>{assets.length}</Text></View>
-                <TouchButton title="Escanear código QR" onPress={async () => { if (!cameraPermission?.granted) { const result = await requestCameraPermission(); if (!result.granted) return; } setScanning(true); }} />
+                <TouchButton title="Escanear código QR" onPress={async () => { if (!cameraPermission?.granted) { const result = await requestCameraPermission(); if (!result.granted) { Alert.alert("Permiso de cámara denegado", "Puedes elegir el activo manualmente desde el catálogo."); return; } } setScanning(true); }} />
                 <Text style={styles.helper}>Selecciona un activo sincronizado para consultar o reportar una anomalía.</Text>
-                {pendingReports > 0 && <Text style={styles.queueBadge}>COLA OFFLINE · {pendingReports} pendiente{pendingReports === 1 ? "" : "s"}</Text>}
+                {pendingCount > 0 && <Text style={styles.queueBadge}>COLA OFFLINE · {pendingCount} pendiente{pendingCount === 1 ? "" : "s"}</Text>}
                 <FlatList
                   data={assets}
                   keyExtractor={(item) => item.id}
@@ -412,17 +466,38 @@ export default function App() {
             {screen === "orders" && (
               <>
                 <Text style={styles.eyebrow}>TRABAJO ASIGNADO</Text><Text style={styles.sectionTitle}>Mis órdenes de trabajo</Text>
-                <FlatList data={orders} keyExtractor={(item) => item.id} scrollEnabled={false} ListEmptyComponent={<EmptyState text="No hay órdenes asignadas en este dispositivo." />} renderItem={({ item }) => <View style={styles.orderCard}><View style={styles.orderTop}><Text style={styles.orderAsset}>{assetDisplayName(item.asset_id, assets)}</Text><Text style={[styles.orderPriority, { color: severityColor(item.priority) }]}>{item.priority}</Text></View><Text style={styles.orderTitle}>{item.title}</Text><Text style={styles.orderDescription}>{item.description}</Text><Text style={styles.orderStatus}>{item.status.replaceAll("_", " ")}</Text><TouchableOpacity style={styles.quickCopilot} onPress={() => { setSelectedAsset(assets.find((asset) => asset.id === item.asset_id) ?? null); setScreen("report"); }}><Text style={styles.quickCopilotText}>Diagnóstico con SIGMA Copilot →</Text></TouchableOpacity></View>} />
+                <FlatList data={orders} keyExtractor={(item) => item.id} scrollEnabled={false} ListEmptyComponent={<EmptyState text="No hay órdenes asignadas en este dispositivo." />} renderItem={({ item }) => <TouchableOpacity style={styles.orderCard} onPress={() => { setSelectedOrderId(item.id); setClosingNote(item.closing_note ?? ""); setScreen("order-detail"); }}><View style={styles.orderTop}><Text style={styles.orderAsset}>{assetDisplayName(item.asset_id, assets)}</Text><Text style={[styles.orderPriority, { color: severityColor(item.priority) }]}>{item.priority}</Text></View><Text style={styles.orderTitle}>{item.title}</Text><Text style={styles.orderDescription}>{item.description}</Text><Text style={styles.orderStatus}>{workOrderStatusLabel(item.status)}</Text></TouchableOpacity>} />
               </>
             )}
+            {screen === "order-detail" && (() => {
+              const order = orders.find((item) => item.id === selectedOrderId);
+              if (!order) return <EmptyState text="La orden ya no está disponible en este dispositivo." />;
+              const canAdvance = session.role === "TECNICO" && order.assigned_to === session.userId && (order.status === "ASIGNADA" || order.status === "EN_PROGRESO");
+              return (
+                <>
+                  <TouchableOpacity style={styles.backButton} onPress={() => setScreen("orders")}><Text style={styles.quickCopilotText}>‹ Volver a Mis OTs</Text></TouchableOpacity>
+                  <Text style={styles.eyebrow}>DETALLE DE ORDEN ASIGNADA</Text>
+                  <Text style={styles.sectionTitle}>{order.title}</Text>
+                  <Text style={styles.orderAsset}>{assetDisplayName(order.asset_id, assets)}</Text>
+                  <Text style={styles.orderDescription}>{order.description}</Text>
+                  <Text style={styles.orderStatus}>Estado: {workOrderStatusLabel(order.status)}</Text>
+                  {order.status === "CERRADA" && !!order.closing_note && <Text style={styles.orderDescription}>Nota de cierre: {order.closing_note}</Text>}
+                  {canAdvance && order.status === "EN_PROGRESO" && <>
+                    <Text style={styles.label}>Nota breve de cierre</Text>
+                    <TextInput style={[styles.input, styles.descriptionInput]} value={closingNote} onChangeText={setClosingNote} placeholder="Trabajo realizado y resultado…" placeholderTextColor={colors.muted} maxLength={500} multiline textAlignVertical="top" />
+                  </>}
+                  {canAdvance && <TouchButton title={busy ? "Guardando…" : order.status === "ASIGNADA" ? "Iniciar trabajo" : "Completar orden"} onPress={() => void advanceWorkOrder(order)} disabled={busy || (order.status === "EN_PROGRESO" && !closingNote.trim())} />}
+                </>
+              );
+            })()}
             {screen === "pending" && (
               <>
-                <View style={styles.sectionTitleRow}><View><Text style={styles.eyebrow}>SINCRONIZACIÓN OFFLINE</Text><Text style={styles.sectionTitle}>Bandeja de pendientes</Text></View><Text style={styles.countBadge}>{pendingReports}</Text></View>
-                <Text style={styles.helper}>Reportes guardados en este dispositivo que todavía no se han sincronizado.</Text>
-                <TouchButton title={syncing ? "Sincronizando…" : "Sincronizar ahora"} onPress={() => void synchronizeNow()} disabled={syncing || !online || pendingReports === 0} />
+                <View style={styles.sectionTitleRow}><View><Text style={styles.eyebrow}>SINCRONIZACIÓN OFFLINE</Text><Text style={styles.sectionTitle}>Bandeja de pendientes</Text></View><Text style={styles.countBadge}>{pendingCount}</Text></View>
+                <Text style={styles.helper}>Reportes y cambios guardados en este dispositivo que todavía no se han sincronizado.</Text>
+                <TouchButton title={syncing ? "Sincronizando…" : "Sincronizar ahora"} onPress={() => void synchronizeNow()} disabled={syncing || !online || pendingCount === 0} />
                 {!online && <Text style={styles.syncHint}>Necesitas conexión a internet para sincronizar.</Text>}
-                {pendingItems.length === 0 ? <EmptyState text="No hay reportes pendientes." /> : pendingItems.map((item) => {
-                  return <View style={styles.pendingCard} key={item.id}><View style={styles.orderTop}><Text style={styles.orderAsset}>{assetDisplayName(item.asset_id, assets)}</Text><Text style={[styles.orderPriority, { color: severityColor(item.severity) }]}>{item.severity}</Text></View><Text style={styles.orderDescription}>{item.description}</Text><Text style={styles.pendingDate}>Guardado {new Date(item.created_at).toLocaleString("es-CL")}</Text></View>;
+                {pendingItems.length === 0 ? <EmptyState text="No hay elementos pendientes." /> : pendingItems.map((item) => {
+                  return <View style={styles.pendingCard} key={`${item.kind}-${item.id}`}><View style={styles.orderTop}><Text style={styles.orderAsset}>{assetDisplayName(item.asset_id, assets)}</Text><Text style={[styles.orderPriority, { color: item.kind === "report" ? severityColor(item.severity) : colors.amber }]}>{item.kind === "report" ? item.severity : `OT · ${workOrderStatusLabel(item.status)}`}</Text></View>{item.kind === "report" ? <Text style={styles.orderDescription}>{item.description}</Text> : <><Text style={styles.orderTitle}>{item.title}</Text>{!!item.closing_note && <Text style={styles.orderDescription}>Nota de cierre: {item.closing_note}</Text>}</>}<Text style={styles.pendingDate}>Guardado {new Date(item.created_at).toLocaleString("es-CL")}</Text></View>;
                 })}
               </>
             )}
@@ -456,6 +531,11 @@ function severityColor(value: string): string {
   if (value === "ALTA" || value === "CRITICA") return colors.red;
   if (value === "MEDIA") return colors.amber;
   return colors.blue;
+}
+
+function workOrderStatusLabel(status: WorkOrder["status"]): string {
+  if (status === "CERRADA") return "Completada";
+  return status.replaceAll("_", " ").toLocaleLowerCase("es-CL");
 }
 
 function messageOf(error: unknown): string {
@@ -727,6 +807,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: colors.surface
   },
+  backButton: { alignSelf: "flex-start", paddingVertical: 5 },
   copilotHeading: { color: colors.text, fontSize: 17, fontWeight: "900" },
   copilotAnswer: {
     color: colors.text,

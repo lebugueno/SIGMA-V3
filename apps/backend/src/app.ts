@@ -14,7 +14,18 @@ const allowedOrigins = new Set(
   [
     "http://localhost:5173",
     "http://localhost:8081",
-    ...env.CORS_ORIGIN.split(",").map((origin) => origin.trim())
+    ...env.CORS_ORIGIN.split(",").map((origin) => {
+      const configuredOrigin = origin.trim();
+      try {
+        return new URL(
+          configuredOrigin.includes("://")
+            ? configuredOrigin
+            : `https://${configuredOrigin}`
+        ).origin;
+      } catch {
+        return configuredOrigin;
+      }
+    })
   ]
 );
 
@@ -24,7 +35,8 @@ function isAllowedOrigin(origin: string): boolean {
     const url = new URL(origin);
     return (
       url.protocol === "https:" &&
-      /^[a-z0-9-]+\.app\.github\.dev$/i.test(url.hostname)
+      (/^(?:[a-z0-9-]+\.)+vercel\.app$/i.test(url.hostname) ||
+        /^[a-z0-9-]+\.app\.github\.dev$/i.test(url.hostname))
     );
   } catch {
     return false;

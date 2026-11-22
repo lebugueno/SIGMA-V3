@@ -80,6 +80,7 @@ export const WorkOrderSchema = z.object({
   asset_id: idSchema,
   title: z.string().trim().min(1),
   description: z.string().trim().min(1),
+  closing_note: z.string().trim().max(500).optional(),
   priority: z.enum(["BAJA", "MEDIA", "ALTA"]),
   status: z.enum(["PENDIENTE", "ASIGNADA", "EN_PROGRESO", "CERRADA"]),
   assigned_to: idSchema.optional(),
@@ -116,7 +117,8 @@ export const RBAC_PERMISSIONS = {
     "anomalies:create",
     "anomalies:update",
     "assets:read",
-    "workOrders:read"
+    "workOrders:read",
+    "workOrders:update"
   ],
   SUPERVISOR: [
     "organizations:read",

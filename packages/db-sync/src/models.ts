@@ -127,6 +127,7 @@ const workOrderSchema = new Schema(
     asset_id: { type: String, required: true, trim: true },
     title: { type: String, required: true, trim: true },
     description: { type: String, required: true, trim: true },
+    closing_note: { type: String, trim: true, maxlength: 500 },
     priority: { type: String, enum: ["BAJA", "MEDIA", "ALTA"], required: true },
     status: {
       type: String,

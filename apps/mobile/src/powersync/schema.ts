@@ -48,11 +48,23 @@ export const sigmaSchema = new Schema({
     asset_id: column.text,
     title: column.text,
     description: column.text,
+    closing_note: column.text,
     priority: column.text,
     status: column.text,
     assigned_to: column.text,
     created_by: column.text,
     created_at: column.text,
     updated_at: column.text
-  })
+  }),
+  ordenes_trabajo_locales: new Table(
+    {
+      tenant_id: column.text,
+      work_order_id: column.text,
+      status: column.text,
+      closing_note: column.text,
+      created_at: column.text,
+      sync_status: column.text
+    },
+    { localOnly: true }
+  )
 });

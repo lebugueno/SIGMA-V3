@@ -35,6 +35,7 @@ export interface CreateWorkOrderInput {
 export interface UpdateWorkOrderInput {
   title?: string;
   description?: string;
+  closing_note?: string;
   priority?: WorkOrder["priority"];
   status?: WorkOrder["status"];
   assigned_to?: string | null;

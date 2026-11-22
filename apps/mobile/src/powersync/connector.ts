@@ -47,6 +47,12 @@ export class SigmaPowerSyncConnector implements PowerSyncBackendConnector {
           [clientMutationId]
         );
       }
+      if (entry.table === "ordenes_trabajo") {
+        await database.execute(
+          "UPDATE ordenes_trabajo_locales SET sync_status = 'SYNCED' WHERE work_order_id = ?",
+          [entry.id]
+        );
+      }
     }
   }
 }

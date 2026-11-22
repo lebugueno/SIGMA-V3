@@ -35,6 +35,7 @@ export const CreateWorkOrderSchema = WorkOrderSchema.omit({
 export const UpdateWorkOrderSchema = WorkOrderSchema.pick({
   title: true,
   description: true,
+  closing_note: true,
   priority: true,
   status: true,
   assigned_to: true
@@ -43,6 +44,7 @@ export const UpdateWorkOrderSchema = WorkOrderSchema.pick({
   .extend({
     title: WorkOrderSchema.shape.title.max(200).optional(),
     description: WorkOrderSchema.shape.description.max(4000).optional(),
+    closing_note: WorkOrderSchema.shape.closing_note,
     assigned_to: z.string().trim().min(1).nullable().optional()
   })
   .strict()
@@ -57,6 +59,7 @@ function serializeWorkOrder(workOrder: {
   asset_id: string;
   title: string;
   description: string;
+  closing_note?: string | null;
   priority: string;
   status: string;
   assigned_to?: string | null;
@@ -74,6 +77,7 @@ function serializeWorkOrder(workOrder: {
     asset_id: workOrder.asset_id,
     title: workOrder.title,
     description: workOrder.description,
+    ...(workOrder.closing_note ? { closing_note: workOrder.closing_note } : {}),
     priority: workOrder.priority,
     status: workOrder.status,
     ...(workOrder.assigned_to ? { assigned_to: workOrder.assigned_to } : {}),
@@ -278,7 +282,6 @@ workOrdersRouter.post(
 workOrdersRouter.patch(
   "/:id",
   requirePermission("workOrders", "update"),
-  requireRole("SUPERVISOR"),
   validateBody(UpdateWorkOrderSchema),
   async (req, res) => {
     const { user, tenantId } = req;
@@ -296,6 +299,29 @@ workOrdersRouter.patch(
           .session(session)
           .exec();
         if (!workOrder) throw new HttpError(404, "Orden de trabajo no encontrada");
+        if (user.role === "TECNICO") {
+          const fields = Object.keys(patch);
+          if (
+            workOrder.assigned_to !== user.userId ||
+            fields.some((field) => !["status", "closing_note"].includes(field))
+          ) {
+            throw new HttpError(403, "Solo puede actualizar el estado de una orden asignada");
+          }
+          const validTransition =
+            (workOrder.status === "ASIGNADA" && patch.status === "EN_PROGRESO") ||
+            (workOrder.status === "EN_PROGRESO" && patch.status === "CERRADA");
+          if (!validTransition) {
+            throw new HttpError(400, "La transición de estado no es válida");
+          }
+          if (patch.closing_note !== undefined && patch.status !== "CERRADA") {
+            throw new HttpError(400, "La nota solo se puede guardar al completar la orden");
+          }
+          if (patch.status === "CERRADA" && !patch.closing_note?.trim()) {
+            throw new HttpError(400, "Agrega una nota breve para cerrar la orden");
+          }
+        } else if (user.role !== "SUPERVISOR") {
+          throw new HttpError(403, "No tiene permisos para actualizar órdenes de trabajo");
+        }
         if (patch.assigned_to !== undefined) {
           await assertWorkOrderReferences(
             {

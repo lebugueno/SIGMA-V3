@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "cl.sigma.terreno",
-      "permissions": ["CAMERA"]
+      "permissions": ["android.permission.CAMERA"]
     },
     "plugins": [
       "expo-dev-client",

@@ -11,7 +11,7 @@ que la creación y modificación de órdenes de trabajo y sus eventos de auditor
 se confirmen en una misma transacción.
 
 Para poblar una organización de demostración, define `SEED_PASSWORD` en `.env`
-y ejecuta `pnpm --filter backend seed`. El seed crea el tenant
+y ejecuta `pnpm --filter @sigma/backend seed`. El seed crea el tenant
 `org_sigma_demo`, cuatro usuarios (`tecnico@sigma.demo`, `supervisor@sigma.demo`,
 `bodega@sigma.demo`, `gerencia@sigma.demo`) y tres activos con códigos QR de
 prueba; todos los usuarios reciben la contraseña definida en `SEED_PASSWORD`.
